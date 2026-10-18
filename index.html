@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PacketStory - Every packet tells a story</title>
+<style>
+  :root { --bg:#0f172a; --panel:#1e293b; --line:#334155; --text:#e2e8f0; --mute:#94a3b8;
+          --accent:#38bdf8; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,Segoe UI,sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:18px 28px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:20px; }
+  header p { margin:2px 0 0; color:var(--mute); }
+  main { max-width:1200px; margin:0 auto; padding:14px 24px; }
+  #drop { border:2px dashed var(--line); border-radius:12px; padding:14px 24px; text-align:center;
+          background:var(--panel); cursor:pointer; transition:.15s; }
+  #drop.over, #drop:hover { border-color:var(--accent); background:#243247; }
+  #drop strong { font-size:17px; }
+  #drop small { display:block; color:var(--mute); margin-top:2px; }
+  #drop button { margin-top:8px; padding:6px 18px; }
+  button { background:var(--accent); color:#06283d; border:0; border-radius:8px; padding:9px 18px;
+           font-weight:600; cursor:pointer; margin-top:14px; }
+  #status { margin:8px 0; min-height:0; color:var(--mute); }
+  #status.error { color:var(--bad); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin:18px 0; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .card b { display:block; font-size:24px; }
+  .card span { color:var(--mute); font-size:12px; text-transform:uppercase; letter-spacing:.05em; }
+  .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:18px 0 8px; }
+  input[type=search], select { background:var(--panel); color:var(--text); border:1px solid var(--line);
+           border-radius:8px; padding:8px 10px; }
+  input[type=search] { flex:1; min-width:200px; }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border-radius:10px; overflow:hidden; }
+  th, td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--mute); font-size:12px; text-transform:uppercase; cursor:pointer; user-select:none; }
+  tbody tr.flow { cursor:pointer; }
+  tbody tr.flow:hover { background:#273449; }
+  .wrap { overflow-x:auto; }
+  .pill { padding:2px 9px; border-radius:99px; font-size:12px; font-weight:600; }
+  .established,.closed { background:#14532d; color:var(--ok); }
+  .reset,.syn-unanswered { background:#7f1d1d; color:var(--bad); }
+  .handshake-incomplete { background:#713f12; color:var(--warn); }
+  .midstream { background:#334155; color:var(--mute); }
+  .detail td { background:#16202f; white-space:normal; }
+  .detail ul { margin:0 0 10px; padding-left:20px; color:var(--warn); }
+  .detail table { font-size:12px; }
+  .mono { font-family:Consolas,monospace; }
+  .alerts { background:#3b2f0b; border:1px solid #713f12; color:var(--warn); border-radius:10px; margin:0 0 12px; padding:10px 10px 10px 30px; }
+  .detail ul.notes { color:var(--accent); }
+  .two { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:12px; }
+  .bar { display:flex; align-items:center; gap:8px; margin:5px 0; font-size:12px; }
+  .bar i { width:70px; font-style:normal; color:var(--mute); }
+  .bar u { display:block; height:12px; background:var(--accent); border-radius:3px; min-width:1px; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:8px; margin:6px 0 12px; }
+  .stats div { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 10px; }
+  .stats span { display:block; color:var(--mute); font-size:11px; text-transform:uppercase; }
+  h2 { font-size:16px; margin:26px 0 0; }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 14px; }
+  .tab { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:8px; margin:0;
+         padding:11px 16px; font-size:15px; font-weight:500; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tab.on { border-color:var(--accent); background:#243247; }
+  .tab.cmp { color:var(--accent); font-weight:700; }
+  .tab.clear { color:var(--mute); }
+  .tab .x { margin-left:8px; color:var(--mute); }
+  .tab .x:hover { color:var(--bad); }
+  .tab .badge { float:none; margin-left:8px; }
+  #compare tr.flow { cursor:pointer; }
+  details.sec { background:var(--panel); border:1px solid var(--line); border-radius:10px; margin:12px 0; padding:0 14px 10px; }
+  details.sec > summary { cursor:pointer; padding:11px 0; font-weight:600; list-style:none; }
+  details.sec > summary small { color:var(--mute); font-weight:400; margin-left:10px; }
+  .badge { float:right; background:#713f12; color:var(--warn); border-radius:99px; padding:1px 10px; font-size:12px; }
+  .mute { color:var(--mute); margin:4px 0 10px; }
+  details.sec table { background:transparent; margin-bottom:10px; }
+  .bar i { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  [hidden] { display:none !important; }
+  .sum { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin:0 0 14px; }
+  .sum .top { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  .sum .score { font-size:30px; font-weight:800; }
+  .health { padding:3px 12px; border-radius:99px; font-weight:700; font-size:13px; text-transform:uppercase; }
+  .health.healthy { background:#14532d; color:var(--ok); }
+  .health.minor { background:#1e3a5f; color:var(--accent); }
+  .health.degraded { background:#713f12; color:var(--warn); }
+  .health.critical { background:#7f1d1d; color:var(--bad); }
+  .issue { display:flex; gap:12px; align-items:stretch; margin:10px 0; background:#16202f; border-radius:8px; overflow:hidden; }
+  .issue .cat { flex:0 0 96px; display:flex; align-items:center; justify-content:center; text-align:center; padding:8px;
+                font-weight:800; font-size:13px; text-transform:uppercase; letter-spacing:.5px; }
+  .issue.critical .cat { background:#7f1d1d; color:#fecaca; } .issue.high .cat { background:#7c2d12; color:#fed7aa; }
+  .issue.medium .cat { background:#713f12; color:#fde68a; } .issue.low .cat { background:#334155; color:#cbd5e1; }
+  .issue .txt { padding:6px 12px 6px 0; min-width:0; }
+  .issue b small { color:var(--mute); font-weight:500; margin-left:8px; text-transform:uppercase; }
+  .issue p { margin:3px 0; font-size:13px; }
+  .issue .act { color:var(--ok); }
+  .actions { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 12px; }
+  .actions button, .tab.merge { margin:0; }
+  .tab.merge { color:var(--ok); font-weight:700; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PacketStory</h1>
+  <p><b>Every packet tells a story. Understand yours.</b> Upload a capture to troubleshoot TCP, UDP, DNS, DHCP, ICMP, ARP and every other port and protocol.</p>
+</header>
+<main>
+  <div id="drop" tabindex="0">
+    <strong>Drop one or more .pcap / .pcapng files here</strong>
+    <small>or click to browse &middot; select multiple files &middot; any port, any IP protocol &middot; max 200 MB each</small>
+    <button type="button">Choose files</button>
+    <input id="file" type="file" accept=".pcap,.cap,.pcapng" multiple hidden>
+  </div>
+  <div id="status"></div>
+  <div id="tabs" class="tabs" hidden></div>
+
+  <section id="compare" hidden></section>
+  <section id="results" hidden>
+    <div id="summary"></div>
+    <div class="actions">
+      <button type="button" id="expFindings">Export findings (CSV)</button>
+      <button type="button" id="expFlows">Export TCP flows (CSV)</button>
+    </div>
+    <div class="cards" id="cards"></div>
+    <div id="overview"></div>
+    <div id="extras"></div>
+
+    <h2>TCP flows</h2>
+    <div class="toolbar">
+      <input id="q" type="search" placeholder="Filter by IP or port…">
+      <select id="stateFilter"><option value="">All states</option></select>
+      <label><input id="onlyProblems" type="checkbox"> Problems only</label>
+    </div>
+    <div class="wrap">
+      <table>
+        <thead><tr id="head"></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const COLS = [
+  ["id","#"],["client","Client"],["server","Server"],["application","App"],["state","State"],["packets","Pkts"],
+  ["bytes","Bytes"],["max_frame_size","Max frame"],["mtu_from_mss","MTU (MSS)"],["handshake_rtt_ms","RTT (ms)"],
+  ["retransmission_pct","Retrans %"],["resets","RST"],["zero_windows","Zero-win"],["duration","Duration (s)"]
+];
+let data = null, sortKey = "id", sortDir = 1;
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = v => v == null ? "–" : (typeof v === "number" && !Number.isInteger(v) ? v.toFixed(3) : v);
+const flowBytes = f => f.bytes_client_to_server + f.bytes_server_to_client;
+
+const MAX_BYTES = 200 * 1024 * 1024;
+const files = [];            // {name, size, state: queued|running|done|error, data, error}
+let active = null;           // index into files, or "compare"
+let processing = false;
+
+function setStatus(msg, err) { $("status").textContent = msg; $("status").className = err ? "error" : ""; }
+
+function enqueue(fileList) {
+  const picked = [...fileList];
+  if (!picked.length) return;
+  for (const f of picked) {
+    const item = { name: f.name, size: f.size, file: f, state: "queued", data: null, error: null };
+    if (f.size > MAX_BYTES) { item.state = "error"; item.error = "File exceeds the 200 MB limit."; item.file = null; }
+    files.push(item);
+  }
+  renderTabs();
+  processQueue();
+}
+
+async function processQueue() {
+  if (processing) return;
+  processing = true;
+  try {
+    let item;
+    while ((item = files.find(x => x.state === "queued"))) {
+      item.state = "running";
+      renderTabs();
+      setStatus(`Analyzing ${item.name} (${(item.size/1048576).toFixed(1)} MB)… ${files.filter(x => x.state === "queued").length} more queued`);
+      try {
+        const res = await fetch("/api/analyze", { method: "POST", body: item.file });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error || res.statusText);
+        item.data = body; item.state = "done";
+      } catch (e) {
+        item.state = "error"; item.error = e.message;
+      }
+      renderTabs();
+      if (active === null) selectTab(files.indexOf(item));
+      else if (active === "compare") renderCompare();
+      else if (active === files.indexOf(item)) selectTab(active);
+    }
+  } finally {
+    processing = false;
+  }
+  const done = files.filter(x => x.state === "done").length, bad = files.filter(x => x.state === "error").length;
+  setStatus(`Finished: ${done} analyzed` + (bad ? `, ${bad} failed` : ""), bad && !done);
+  if (done > 1 && active !== "compare" && !userPicked) selectTab("compare");
+}
+
+let userPicked = false;
+function selectTab(i) {
+  active = i;
+  renderTabs();
+  $("compare").hidden = i !== "compare";
+  if (i === "compare") { $("results").hidden = true; renderCompare(); return; }
+  const item = files[i];
+  if (item && item.state === "done") { data = item.data; render(); }
+  else { $("results").hidden = true; setStatus(item ? (item.error ? `${item.name}: ${item.error}` : item.name) : "", !!(item && item.error)); }
+}
+
+function removeTab(i) {
+  files.splice(i, 1);
+  if (!files.length) { active = null; $("tabs").hidden = true; $("results").hidden = $("compare").hidden = true; setStatus(""); return; }
+  active = typeof active === "number" ? Math.min(active > i ? active - 1 : active, files.length - 1) : active;
+  if (active === "compare" && files.filter(f => f.state === "done").length < 2) active = 0;
+  selectTab(active);
+}
+
+function renderTabs() {
+  const t = $("tabs");
+  t.hidden = !files.length;
+  const icon = { queued: "⏳", running: "⚙️", done: "", error: "⚠️" };
+  const tabs = files.map((f, i) => {
+    const n = f.state === "done" ? f.data.alerts.length + f.data.problem_flows.length : 0;
+    return `<button class="tab${active === i ? " on" : ""}" data-i="${i}" title="${esc(f.name)}">${icon[f.state]} ${esc(f.name)}${
+      n ? `<span class="badge">${n}</span>` : ""}<span class="x" data-x="${i}" title="Remove">×</span></button>`;
+  }).join("");
+  const cmp = files.filter(f => f.state === "done").length > 1
+    ? `<button class="tab cmp${active === "compare" ? " on" : ""}" data-i="compare">Compare all</button>` : "";
+  const mergeable = files.filter(f => f.state === "done" && f.file);
+  const merge = mergeable.length > 1 ? `<button class="tab merge" data-merge="1" title="Interleave by time and analyze as one capture">Merge ${mergeable.length} captures</button>` : "";
+  t.innerHTML = cmp + merge + tabs + `<button class="tab clear" data-clear="1">Clear all</button>`;
+}
+
+async function mergeAll() {
+  const parts = files.filter(f => f.state === "done" && f.file);
+  const total = parts.reduce((a, f) => a + f.size, 0);
+  if (parts.length < 2) return;
+  if (total > MAX_BYTES) { setStatus("Merged size exceeds the 200 MB limit.", true); return; }
+  setStatus(`Merging ${parts.length} captures…`);
+  try {
+    const res = await fetch("/api/analyze/merge", {
+      method: "POST", headers: { "X-File-Sizes": parts.map(f => f.size).join(",") },
+      body: new Blob(parts.map(f => f.file)),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    files.push({ name: `Merged (${parts.length} captures)`, size: total, file: null, state: "done", data: body, error: null, merged: true });
+    userPicked = true;
+    selectTab(files.length - 1);
+    setStatus(`Merged ${parts.length} captures into one timeline.`);
+  } catch (e) {
+    setStatus("Merge failed: " + e.message, true);
+  }
+}
+
+const SEV = { critical: "🔴", high: "🟠", medium: "🟡", low: "⚪" };
+function renderSummary() {
+  const s = data.summary;
+  const issues = s.issues.map(i => `<div class="issue ${i.severity}"><div class="cat">${esc(i.category)}</div><div class="txt"><b>${SEV[i.severity]} ${esc(i.title)}<small>${i.severity}</small></b>
+    ${i.detail ? `<p>${esc(i.detail)}</p>` : ""}<p class="act">▶ ${esc(i.action)}</p>
+    ${i.flows.length ? `<p class="mute">TCP flows: ${i.flows.map(x => "#" + x).join(", ")}</p>` : ""}</div></div>`).join("");
+  $("summary").innerHTML = `<div class="sum"><div class="top"><span class="score">${s.score}<small style="font-size:14px;color:var(--mute)">/100</small></span>
+    <span>${esc(s.headline)}</span></div>${issues}</div>`;
+}
+
+function download(name, text, type) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const csvCell = v => { let s = v == null ? "" : String(v); if (/^[=+\-@]/.test(s)) s = "'" + s; return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+const toCsv = (head, rows) => [head, ...rows].map(r => r.map(csvCell).join(",")).join("\r\n");
+const baseName = () => (files[active]?.name || "capture").replace(/\.[^.]+$/, "").replace(/[^\w.-]+/g, "_");
+
+function exportFindings() {
+  const rows = data.summary.issues.map(i => [i.severity, i.category, i.title, i.detail, i.action, i.flows.join(" ")]);
+  for (const f of data.flows) for (const x of f.findings) rows.push(["flow", "TCP", x, `${f.client} -> ${f.server}`, "", f.id]);
+  for (const a of data.alerts) rows.push(["alert", "", a, "", "", ""]);
+  download(baseName() + "-findings.csv", toCsv(["severity", "category", "title", "detail", "recommended_action", "flows"], rows), "text/csv");
+}
+function exportFlows() {
+  const keys = ["id", "client", "server", "application", "app_detail", "state", "packets", "bytes_client_to_server", "bytes_server_to_client",
+    "duration", "handshake_rtt_ms", "rtt_avg_ms", "retransmissions", "retransmission_pct", "resets", "zero_windows", "max_frame_size",
+    "mtu_from_mss", "icmp_mtu", "tls_version", "findings"];
+  download(baseName() + "-tcp-flows.csv", toCsv(keys, data.flows.map(f => keys.map(k => Array.isArray(f[k]) ? f[k].join(" | ") : f[k]))), "text/csv");
+}
+
+function renderCompare() {
+  const done = files.map((f, i) => ({ f, i })).filter(x => x.f.state === "done");
+  const rows = done.map(({ f, i }) => {
+    const d = f.data;
+    const dnsBad = d.dns.unanswered + Object.entries(d.dns.rcodes).filter(([k]) => k !== "NOERROR").reduce((a, [, v]) => a + v, 0);
+    return `<tr class="flow" data-i="${i}"><td>${esc(f.name)}</td><td>${d.summary.score}</td><td>${esc(d.summary.health)}</td><td>${hb(f.size)}</td><td>${d.total_packets}</td>
+      <td>${d.duration.toFixed(2)}</td><td>${d.flow_count}</td><td>${d.problem_flows.length}</td>
+      <td>${d.overview.total_retransmissions}</td><td>${d.udp.count}</td><td>${dnsBad}</td>
+      <td>${d.icmp.errors.length}</td><td>${d.alerts.length}</td></tr>`;
+  }).join("");
+  const failed = files.filter(f => f.state === "error").map(f => `${f.name}: ${f.error}`);
+  $("compare").innerHTML = `<h2>Comparison</h2><p class="mute">Click a row to open that capture.</p>
+    <div class="wrap"><table><thead><tr><th>Capture</th><th>Score</th><th>Health</th><th>Size</th><th>Packets</th><th>Duration (s)</th><th>TCP flows</th>
+    <th>Problem flows</th><th>Retrans</th><th>UDP flows</th><th>DNS issues</th><th>ICMP errors</th><th>Alerts</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>${failed.length ? `<ul class="alerts">${failed.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}`;
+  $("compare").hidden = false;
+}
+
+const hb = n => n >= 1e9 ? (n/1e9).toFixed(2) + " GB" : n >= 1e6 ? (n/1e6).toFixed(2) + " MB" : n >= 1e3 ? (n/1e3).toFixed(1) + " KB" : n + " B";
+const tbl = (heads, rows, mono) => `<div class="wrap"><table><thead><tr>${heads.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${
+  rows.map(r => `<tr>${r.map((c, i) => `<td${mono && mono.includes(i) ? ' class="mono"' : ""}>${esc(c ?? "–")}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${heads.length}">None</td></tr>`
+}</tbody></table></div>`;
+const list = (items, cls) => items.length ? `<ul class="${cls || "alerts"}">${items.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "";
+const section = (title, summary, findings, inner) => `<details class="sec"${findings.length ? " open" : ""}><summary>${title}<small>${esc(summary)}</small>${
+  findings.length ? `<span class="badge">${findings.length} finding${findings.length > 1 ? "s" : ""}</span>` : ""}</summary>${list(findings)}${inner}</details>`;
+const barList = (items, key) => { const m = Math.max(1, ...items.map(i => i[key])); return items.map(i =>
+  `<div class="bar"><i title="${esc(i.name)}">${esc(i.name)}</i><u style="width:${(i[key]/m*100).toFixed(1)}%"></u><em>${key === "bytes" ? hb(i.bytes) : i[key]}</em></div>`).join(""); };
+const lat = l => l ? `min ${l.min} / avg ${l.avg} / p95 ${l.p95} / max ${l.max} ms` : "n/a";
+
+function renderExtras() {
+  const d = data, dns = d.dns, icmp = d.icmp, arp = d.arp, dhcp = d.dhcp, udp = d.udp;
+  const out = [];
+  out.push(`<div class="two">
+    <div class="card"><span>Protocols (by bytes)</span>${barList(d.protocols, "bytes")}</div>
+    <div class="card"><span>Applications / services (by bytes)</span>${barList(d.applications.slice(0, 12), "bytes")}</div></div>`);
+  out.push(section("Ports", `${d.ports.length} busiest`, d.ports.filter(p => p.resets).map(p => `${p.proto}/${p.port}${p.service ? " (" + p.service + ")" : ""}: ${p.resets} reset(s) across ${p.flows} flow(s)`).slice(0, 5),
+    tbl(["Proto", "Port", "Service", "Flows", "Packets", "Bytes", "Problem flows", "Resets"],
+      d.ports.map(p => [p.proto, p.port, p.service, p.flows, p.packets, hb(p.bytes), p.problem_flows, p.resets]))));
+  if (dns.queries || dns.responses) {
+    out.push(section("DNS", `${dns.queries} queries, ${dns.responses} responses, ${dns.unanswered} unanswered`, dns.findings,
+      `<p class="mute">Latency: ${lat(dns.latency_ms)} · DNS-over-TCP messages: ${dns.tcp_messages}</p>
+       <div class="two"><div>${tbl(["Servers", "Queries", "Responses", "Avg ms", "Max ms"], dns.servers.map(s => [s.server, s.queries, s.responses, s.avg_ms, s.max_ms]), [0])}</div>
+       <div>${tbl(["Top queried names", "Count"], dns.top_queries.map(q => [q.name, q.count]), [0])}</div></div>
+       ${tbl(["Response codes", "Count"], Object.entries(dns.rcodes))}
+       ${dns.failures.length ? tbl(["Failed lookups", "Client", "Server", "Type", "Code"], dns.failures.map(f => [f.name, f.client, f.server, f.type, f.rcode]), [0, 1, 2]) : ""}`));
+  }
+  if (dhcp.transactions) {
+    out.push(section("DHCP", `${dhcp.transactions} transaction(s)`, dhcp.findings, tbl(["Message", "Count"], Object.entries(dhcp.messages))));
+  }
+  if (icmp.messages) {
+    const e = icmp.echo;
+    out.push(section("ICMP / ICMPv6", `${icmp.messages} messages` + (e.requests ? `, ${e.loss_pct}% echo loss` : ""), icmp.findings,
+      `${e.requests ? `<p class="mute">Echo: ${e.requests} requests, ${e.replies} replies, ${e.unanswered} unanswered. RTT: ${lat(e.rtt_ms)}</p>` : ""}
+       ${tbl(["Message type", "Count"], icmp.types.map(t => [t.name, t.count]))}
+       ${icmp.errors.length ? tbl(["Error from", "To", "Description", "Original dst", "Proto", "Port"], icmp.errors.slice(0, 100).map(x => [x.reporter, x.to, x.description, x.original_dst, x.original_proto, x.original_port]), [0, 1, 3]) : ""}`));
+  }
+  if (arp.requests || arp.replies) {
+    out.push(section("ARP", `${arp.requests} requests, ${arp.replies} replies, ${arp.gratuitous} gratuitous`, arp.findings,
+      `${arp.unanswered.length ? tbl(["Unanswered ARP for", "Asked by", "Attempts"], arp.unanswered.map(u => [u.ip, u.asked_by, u.attempts]), [0, 1]) : ""}
+       ${arp.conflicts.length ? tbl(["Conflicting IP", "MAC addresses"], arp.conflicts.map(c => [c.ip, c.macs.join(", ")]), [0, 1]) : ""}
+       ${tbl(["Host IP", "MAC"], arp.hosts.map(h => [h.ip, h.mac]), [0, 1])}`));
+  }
+  if (udp.count) {
+    const bad = udp.flows.filter(f => f.findings.length);
+    out.push(section("UDP flows", `${udp.count} flows` + (udp.dropped ? ` (+${udp.dropped} not tracked)` : ""), bad.slice(0, 5).map(f => `${f.client} → ${f.server}: ${f.findings[0]}`),
+      tbl(["Client", "Server", "App", "Pkts →", "Pkts ←", "Bytes", "Max payload", "Duration (s)", "Findings"],
+        udp.flows.slice(0, 200).map(f => [f.client, f.server, f.application, f.packets_c2s, f.packets_s2c, hb(f.bytes), f.max_payload, fmt(f.duration), f.findings.join(" ")]), [0, 1])));
+  }
+  $("extras").innerHTML = out.join("");
+}
+
+function render() {
+  const problems = data.problem_flows.length;
+  const cards = [
+    [data.total_packets, "Total packets"], [hb(data.overview.total_bytes), "Total size"],
+    [data.tcp_packets, "TCP packets"], [data.flow_count, "TCP flows"], [data.udp.count, "UDP flows"],
+    [problems, "TCP flows with problems"], [data.alerts.length, "Capture-wide alerts"],
+    [data.duration.toFixed(2) + " s", "Capture duration"],
+    [data.overview.avg_frame_size + " B", "Avg frame size"], [data.overview.max_frame_size + " B", "Max frame size"],
+    [data.overview.min_mtu_from_mss ?? "–", "Min MTU (from MSS)"], [data.overview.total_retransmissions, "Retransmissions"],
+    [data.overview.throughput_kbps == null ? "–" : data.overview.throughput_kbps + " kbps", "Avg throughput"],
+  ];
+  const ov = data.overview, maxC = Math.max(1, ...ov.size_distribution.map(b => b.count));
+  const msgs = ov.icmp_mtu_messages.map(m => `ICMP from ${m.reporter}: next-hop MTU ${m.next_hop_mtu} (for ${m.original_destination ?? "?"})`);
+  const allAlerts = [...data.alerts, ...ov.notes, ...msgs];
+  $("overview").innerHTML = `
+    ${allAlerts.length ? `<ul class="alerts">${allAlerts.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+    <div class="two">
+      <div class="card"><span>Packet size distribution (bytes on wire)</span>
+        ${ov.size_distribution.map(b => `<div class="bar"><i>${b.range}</i><u style="width:${(b.count/maxC*100).toFixed(1)}%"></u><em>${b.count}</em></div>`).join("")}</div>
+      <div class="card"><span>Top talkers</span>
+        <table><tbody>${ov.top_talkers.map(t => `<tr><td class="mono">${esc(t.ip)}</td><td>${t.packets} pkts</td><td>${t.bytes} B</td></tr>`).join("")}</tbody></table></div>
+    </div>`;
+  $("cards").innerHTML = cards.map(([v,l]) => `<div class="card"><b>${esc(v)}</b><span>${l}</span></div>`).join("");
+  const states = Object.keys(data.flow_states);
+  $("stateFilter").innerHTML = '<option value="">All states</option>' +
+    states.map(s => `<option value="${esc(s)}">${esc(s)} (${data.flow_states[s]})</option>`).join("");
+  $("head").innerHTML = COLS.map(([k,l]) => `<th data-k="${k}">${l}${k===sortKey?(sortDir>0?" ▲":" ▼"):""}</th>`).join("");
+  drawRows();
+  renderExtras();
+  renderSummary();
+  $("results").hidden = false;
+}
+
+function drawRows() {
+  const q = $("q").value.trim().toLowerCase(), st = $("stateFilter").value, po = $("onlyProblems").checked;
+  const val = f => sortKey === "bytes" ? flowBytes(f) : f[sortKey];
+  const list = data.flows.filter(f =>
+    (!q || (f.client + " " + f.server).toLowerCase().includes(q)) &&
+    (!st || f.state === st) && (!po || f.findings.length));
+  list.sort((a,b) => {
+    const x = val(a), y = val(b);
+    return (x == null ? -1 : y == null ? 1 : x < y ? -1 : x > y ? 1 : 0) * sortDir;
+  });
+  $("rows").innerHTML = list.map(f => `
+    <tr class="flow" data-id="${f.id}">
+      <td>${f.id}</td><td class="mono">${esc(f.client)}</td><td class="mono">${esc(f.server)}</td>
+            <td>${esc(f.application ?? "–")}</td>
+            <td><span class="pill ${esc(f.state)}">${esc(f.state)}</span></td>
+      <td>${f.packets}</td><td>${flowBytes(f)}</td><td>${fmt(f.handshake_rtt_ms)}</td>
+      <td>${f.retransmissions}</td><td>${f.resets}</td><td>${f.zero_windows}</td><td>${fmt(f.duration)}</td>
+    </tr>`).join("") || `<tr><td colspan="${COLS.length}">No flows match.</td></tr>`;
+}
+
+function toggleDetail(tr) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains("detail")) { next.remove(); return; }
+  const f = data.flows.find(x => x.id == tr.dataset.id);
+  const pk = data.packets.filter(p => p.flow === f.id).slice(0, 200);
+  const find = (f.findings.length ? `<ul>${f.findings.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "<p>No problems detected.</p>")
+    + (f.notes.length ? `<ul class="notes">${f.notes.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "");
+  const pair = (a, b) => `${a ?? "–"} / ${b ?? "–"}`;
+  const ttl = x => x ? (x[0] === x[1] ? x[0] : x.join("–")) : "–";
+  const yn = v => v == null ? "–" : v ? "yes" : "no";
+  const stats = [
+    ["Application", f.application ?? "–"], ["Detail (SNI / request)", f.app_detail ?? "–"], ["TLS version", f.tls_version ?? "–"], ["TLS ALPN", (f.tls_alpn || []).join(", ") || "–"],
+    ["HTTP requests", f.http_requests], ["HTTP status codes", Object.entries(f.http_status).map(([c, n]) => `${c}×${n}`).join(", ") || "–"],
+    ["IP version", "IPv" + f.ip_version], ["Max IP packet", f.max_ip_packet + " B"], ["Max TCP payload", f.max_payload + " B"],
+    ["Avg frame", f.avg_frame_size + " B"], ["DF bit seen", yn(f.df_set)],
+    ["MSS (client / server)", pair(f.mss_client, f.mss_server)], ["MTU implied by MSS", f.mtu_from_mss ?? "–"],
+    ["ICMP-reported MTU", f.icmp_mtu ?? "–"],
+    ["Window scale (c / s)", pair(f.wscale_client, f.wscale_server)], ["SACK (c / s)", pair(yn(f.sack_client), yn(f.sack_server))],
+    ["Max window (c / s)", pair(f.max_window_client, f.max_window_server)], ["Min window (c / s)", pair(f.min_window_client, f.min_window_server)],
+    ["TTL (c / s)", `${ttl(f.ttl_client)} / ${ttl(f.ttl_server)}`], ["Est. hops (c / s)", pair(f.hops_client, f.hops_server)],
+    ["RTT min / avg / max (ms)", `${fmt(f.rtt_min_ms)} / ${fmt(f.rtt_avg_ms)} / ${fmt(f.rtt_max_ms)}`],
+    ["Handshake RTT (ms)", fmt(f.handshake_rtt_ms)], ["Server response (ms)", fmt(f.server_response_ms)],
+    ["Retransmissions", `${f.retransmissions} (${f.retransmission_pct}%)`], ["Duplicate ACKs", f.dup_acks],
+    ["Longest idle gap (s)", fmt(f.max_idle_gap)], ["Throughput (kbps)", fmt(f.throughput_kbps)],
+  ].map(([k, v]) => `<div><span>${k}</span><b>${esc(v)}</b></div>`).join("");
+  const t0 = f.start;
+  const body = pk.map(p => `<tr><td>${p.no}</td><td>${(p.time - t0).toFixed(6)}</td>
+    <td class="mono">${esc(p.src)}:${p.sport} → ${esc(p.dst)}:${p.dport}</td>
+    <td>${esc(p.flags)}</td><td>${p.seq}</td><td>${p.ack}</td><td>${p.window}</td><td>${p.len}</td>
+    <td>${p.frame}</td><td>${p.ip_len}</td><td>${p.ttl}</td><td>${p.df ? "DF" : ""}</td></tr>`).join("");
+  const note = data.packets_truncated ? "<p>Packet list was truncated by the server (5,000 max).</p>" : "";
+  tr.insertAdjacentHTML("afterend", `<tr class="detail"><td colspan="${COLS.length}">${find}<div class="stats">${stats}</div>${note}
+    <table><thead><tr><th>No</th><th>Time (s)</th><th>Direction</th><th>Flags</th><th>Seq</th><th>Ack</th><th>Win</th><th>Len</th><th>Frame</th><th>IP len</th><th>TTL</th><th>DF</th></tr></thead>
+    <tbody>${body}</tbody></table></td></tr>`);
+}
+
+const drop = $("drop");
+drop.addEventListener("click", () => $("file").click());
+drop.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") $("file").click(); });
+$("file").addEventListener("change", e => { enqueue(e.target.files); e.target.value = ""; });
+["dragenter","dragover"].forEach(n => drop.addEventListener(n, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(n => drop.addEventListener(n, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => enqueue(e.dataTransfer.files));
+$("tabs").addEventListener("click", e => {
+  const x = e.target.closest("[data-x]");
+  if (x) { removeTab(+x.dataset.x); return; }
+  if (e.target.closest("[data-clear]")) { files.length = 0; removeTab(-1); return; }
+  if (e.target.closest("[data-merge]")) { mergeAll(); return; }
+  const tab = e.target.closest(".tab[data-i]");
+  if (tab) { userPicked = true; selectTab(tab.dataset.i === "compare" ? "compare" : +tab.dataset.i); }
+});
+$("compare").addEventListener("click", e => {
+  const tr = e.target.closest("tr[data-i]");
+  if (tr) { userPicked = true; selectTab(+tr.dataset.i); }
+});
+$("q").addEventListener("input", drawRows);
+$("expFindings").addEventListener("click", exportFindings);
+$("expFlows").addEventListener("click", exportFlows);
+$("stateFilter").addEventListener("change", drawRows);
+$("onlyProblems").addEventListener("change", drawRows);
+$("head").addEventListener("click", e => {
+  const k = e.target.dataset.k; if (!k) return;
+  sortDir = sortKey === k ? -sortDir : 1; sortKey = k; render();
+});
+$("rows").addEventListener("click", e => { const tr = e.target.closest("tr.flow"); if (tr) toggleDetail(tr); });
+</script>
+</body>
+</html>
