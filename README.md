@@ -59,4 +59,4 @@ Pushing a tag such as `v2.0.0` builds the zip on GitHub and attaches it to a rel
 
 ## License
 
-GNU General Public License v3.0. See [LICENSE](LICENSE).
+PacketStory is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

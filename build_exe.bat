@@ -6,6 +6,7 @@ if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 python -m PyInstaller --noconfirm --windowed --name PacketStory --add-data "index.html;." app.py || goto :err
 copy /y README-PORTABLE.txt dist\PacketStory\README.txt >nul
+copy /y LICENSE dist\PacketStory\LICENSE.txt >nul
 if exist PacketStory-Portable.zip del PacketStory-Portable.zip
 python make_zip.py || goto :err
 echo.

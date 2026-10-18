@@ -13,4 +13,4 @@ Notes
 - Closing the window stops the program. Nothing is written outside a temporary folder that is deleted on exit.
 - Windows SmartScreen or antivirus may warn about an unsigned app on first run: choose
   "More info" > "Run anyway".
-- Free software under the GNU GPL v3. Source: https://github.com/prawinnetsecdevops-creator/PacketStory
+- Free software under the MIT License. Source: https://github.com/prawinnetsecdevops-creator/PacketStory
