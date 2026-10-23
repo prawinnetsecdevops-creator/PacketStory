@@ -332,6 +332,20 @@ class ReassemblyTests(unittest.TestCase):
         f = run(pcap([self.c2s(5000, 3128, 1, req, 0.0), self.s2c(3128, 5000, 1, resp, 0.01)]))["flows"][0]
         self.assertEqual(f["http_status"], {"200": 1})
 
+    def test_data_carried_on_syn_is_aligned(self):
+        q = dns_msg(7, "tfo.test")
+        frame = struct.pack(">H", len(q)) + q
+        syn = lambda seq, d: tcp_pkt(self.C, self.S, 5000, 53, seq, 0, 2, d)
+        r = run(pcap([(0.0, syn(100, frame))]))                        # whole query on the SYN
+        self.assertEqual(r["dns"]["queries"], 1)
+        r = run(pcap([(0.0, syn(100, frame[:10])),                     # query split across SYN and next segment
+                      (0.01, tcp_pkt(self.C, self.S, 5000, 53, 111, 1, 0x18, frame[10:]))]))
+        self.assertEqual(r["dns"]["queries"], 1)
+        r = run(pcap([(0.0, syn(100, frame)), (0.01, syn(100, frame))]))  # retransmitted SYN+data counts once
+        self.assertEqual((r["dns"]["queries"], r["flows"][0]["retransmissions"]), (1, 1))
+        http = tcp_pkt(self.C, self.S, 5000, 80, 100, 0, 2, b"GET /tfo HTTP/1.1\r\nHost: h\r\n\r\n")
+        self.assertEqual(run(pcap([(0.0, http)]))["flows"][0]["http_requests"], 1)
+
     def test_snaplen_truncated_hello_still_parsed(self):
         pkt = tcp_pkt(self.C, self.S, 5000, 443, 1, 1, 0x18, client_hello_record(sni=b"cut.example.com", pad=1000))
         f = run(pcap_truncated([(0.0, pkt)], 54 + 100))["flows"][0]

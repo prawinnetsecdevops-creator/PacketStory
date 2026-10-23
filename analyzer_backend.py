@@ -302,7 +302,9 @@ class Flow:
         if p.flags & SYN:
             st.syn(p.seq)
         if p.payload or p.lost:
-            for kind, value in st.feed(p.seq, p.payload, p.lost):
+            # a SYN consumes one sequence number, so data it carries (TCP Fast Open) starts at seq + 1
+            seq = (p.seq + 1) & 0xFFFFFFFF if p.flags & SYN else p.seq
+            for kind, value in st.feed(seq, p.payload, p.lost):
                 self._app_event(kind, value, p)
 
     def _app_event(self, kind: str, v, p: TcpPacket) -> None:
