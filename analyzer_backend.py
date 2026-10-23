@@ -650,16 +650,32 @@ SIZE_BINS = [(64, "â‰¤64"), (127, "65â€“127"), (255, "128â€“255"),
              (1023, "512â€“1023"), (1399, "1024â€“1399"), (1500, "1400â€“1500"), (10**9, ">1500")]
 
 
+DEDUP_WINDOW_S = 0.001
+
+
 def merge_captures(streams: list[BinaryIO]):
-    """Interleave several captures by timestamp and drop exact duplicate packets."""
-    recent: dict[bytes, float] = {}
+    """Interleave several captures by timestamp and drop packets seen by another capture.
+
+    A packet is a duplicate only when an identical packet from a *different* source is within
+    DEDUP_WINDOW_S and not already paired, so repeats inside one capture are all kept.
+    """
+    def tagged(i: int, s: BinaryIO):
+        for _, ts, data, link, orig in read_capture(s):
+            yield ts, i, data, link, orig
+
+    recent: dict[bytes, list[list]] = {}  # key -> [[ts, source, paired], ...]
     n = 0
-    for _, ts, data, link, orig in heapq.merge(*(read_capture(s) for s in streams), key=lambda x: x[1]):
+    for ts, src, data, link, orig in heapq.merge(*(tagged(i, s) for i, s in enumerate(streams)),
+                                                 key=lambda x: x[0]):
         key = hashlib.blake2b(data, digest_size=16).digest()
-        seen = recent.get(key)
-        if seen is not None and abs(ts - seen) < 0.001:
+        entries = [e for e in recent.get(key, ()) if ts - e[0] < DEDUP_WINDOW_S]
+        match = next((e for e in entries if e[1] != src and not e[2]), None)
+        if match is not None:
+            match[2] = True
+            recent[key] = entries
             continue
-        recent[key] = ts
+        entries.append([ts, src, False])
+        recent[key] = entries
         if len(recent) > 200_000:
             recent.clear()
         n += 1

@@ -355,6 +355,17 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(r["sources"], 2)
         self.assertAlmostEqual(r["flows"][0]["handshake_rtt_ms"], 10, delta=1)
 
+    def test_merge_keeps_repeats_within_one_source(self):
+        syn = tcp_pkt("10.0.0.1", "10.0.0.2", 5000, 80, 100, 0, 2)
+        def count(*caps):
+            return sum(1 for _ in t.merge_captures([io.BytesIO(c) for c in caps]))
+        a = pcap([(0.0, syn), (0.0005, syn)])
+        self.assertEqual(count(a), 2)
+        self.assertEqual(count(a, pcap([(0.0, syn)])), 2)           # B pairs with one A copy
+        self.assertEqual(count(a, a), 2)                            # full overlap collapses to 2
+        self.assertEqual(count(a, pcap([(0.0, syn), (0.0004, syn), (0.0008, syn)])), 3)
+        self.assertEqual(count(a, pcap([(5.0, syn)])), 3)           # outside window: distinct
+
     def test_summary_ranks_refused_connection(self):
         r = run(pcap([(0, tcp_pkt("10.0.0.1", "10.0.0.2", 40000, 31337, 1, 0, 2)),
                       (0.001, tcp_pkt("10.0.0.2", "10.0.0.1", 31337, 40000, 0, 2, 0x14))]))
