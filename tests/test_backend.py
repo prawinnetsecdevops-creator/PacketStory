@@ -301,6 +301,37 @@ class ReassemblyTests(unittest.TestCase):
         self.assertEqual(f["http_status"], {"200": 1, "503": 1})
         self.assertEqual(f["app_detail"], "POST /a [h.test]")
 
+    def test_http_head_response_has_no_body(self):
+        req = (b"HEAD /a HTTP/1.1\r\nHost: h\r\n\r\n"
+               b"GET /b HTTP/1.1\r\nHost: h\r\n\r\n")
+        resp = (b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"
+                b"HTTP/1.1 503 Busy\r\nContent-Length: 0\r\n\r\n")
+        f = run(pcap([self.c2s(5000, 80, 1, req, 0.0), self.s2c(80, 5000, 1, resp, 0.01)]))["flows"][0]
+        self.assertEqual(f["http_requests"], 2)
+        self.assertEqual(f["http_status"], {"200": 1, "503": 1})
+        # same with HEAD answered in its own segment, and a chunked-looking HEAD response
+        resp2 = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        f = run(pcap([self.c2s(5000, 80, 1, req, 0.0), self.s2c(80, 5000, 1, resp2, 0.01),
+                      self.s2c(80, 5000, 1 + len(resp2), b"HTTP/1.1 404 NF\r\nContent-Length: 0\r\n\r\n", 0.02)]))["flows"][0]
+        self.assertEqual(f["http_status"], {"200": 1, "404": 1})
+
+    def test_http_response_framing_follows_request_methods(self):
+        req = (b"GET /a HTTP/1.1\r\nHost: h\r\n\r\n"
+               b"HEAD /b HTTP/1.1\r\nHost: h\r\n\r\n"
+               b"GET /c HTTP/1.1\r\nHost: h\r\n\r\n")
+        resp = (b"HTTP/1.1 100 Continue\r\n\r\n"
+                b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc"     # GET keeps its body
+                b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\n"      # HEAD has none
+                b"HTTP/1.1 500 Err\r\nContent-Length: 0\r\n\r\n")
+        f = run(pcap([self.c2s(5000, 80, 1, req, 0.0), self.s2c(80, 5000, 1, resp, 0.01)]))["flows"][0]
+        self.assertEqual(f["http_status"], {"100": 1, "200": 2, "500": 1})
+
+    def test_http_connect_tunnel_stops_parsing(self):
+        req = b"CONNECT h:443 HTTP/1.1\r\nHost: h:443\r\n\r\n"
+        resp = b"HTTP/1.1 200 Connection established\r\n\r\n\x16\x03\x03\x00\x05hello"
+        f = run(pcap([self.c2s(5000, 3128, 1, req, 0.0), self.s2c(3128, 5000, 1, resp, 0.01)]))["flows"][0]
+        self.assertEqual(f["http_status"], {"200": 1})
+
     def test_snaplen_truncated_hello_still_parsed(self):
         pkt = tcp_pkt(self.C, self.S, 5000, 443, 1, 1, 0x18, client_hello_record(sni=b"cut.example.com", pad=1000))
         f = run(pcap_truncated([(0.0, pkt)], 54 + 100))["flows"][0]

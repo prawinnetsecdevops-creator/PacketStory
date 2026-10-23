@@ -12,6 +12,7 @@ loses data (a capture hole or snaplen truncation) stops after one tolerant parse
 from __future__ import annotations
 
 import re
+from collections import deque
 
 from protocols import (
     HTTP_METHODS, parse_client_hello, parse_http_request, parse_http_status, parse_server_hello, tls_alert,
@@ -118,8 +119,9 @@ class DnsStream:
 class HttpStream:
     """HTTP/1.x message heads; bodies (Content-Length or chunked) are skipped without buffering."""
 
-    def __init__(self, request: bool) -> None:
+    def __init__(self, request: bool, methods: deque | None = None) -> None:
         self.request = request
+        self.methods = methods if methods is not None else deque(maxlen=1024)  # shared by both directions
         self.buf = bytearray()
         self.skip = 0
         self.mode = "head"  # head | chunk_size | trailer
@@ -185,6 +187,7 @@ class HttpStream:
 
     def _body(self, head: bytes) -> None:
         if self.request:
+            self.methods.append(head.split(b" ", 1)[0])
             if head.startswith(b"CONNECT "):
                 self.finished = True
                 return
@@ -193,8 +196,14 @@ class HttpStream:
             if status == 101:
                 self.finished = True
                 return
-            if status < 200 or status in (204, 304):
+            if status < 200:
+                return  # interim response: the final one still answers the same request
+            method = self.methods.popleft() if self.methods else None
+            if method == b"CONNECT" and status < 300:
+                self.finished = True  # tunnel established
                 return
+            if method == b"HEAD" or status in (204, 304):
+                return  # headers may advertise a length, but there is no body
         if _CHUNKED.search(head):
             self.mode = "chunk_size"
             return
@@ -350,8 +359,9 @@ def _could_become_known(b: bytes) -> bool:
 class AppStream:
     """One TCP direction: reassemble, detect the protocol, and emit (kind, value) events."""
 
-    def __init__(self, server_side: bool, dns: bool = False) -> None:
+    def __init__(self, server_side: bool, dns: bool = False, methods: deque | None = None) -> None:
         self.server_side = server_side  # True when this direction is server -> client
+        self.methods = methods
         self.re = Reassembler()
         self.parser = DnsStream() if dns else None
         self.pre = bytearray()
@@ -371,9 +381,9 @@ class AppStream:
 
     def _make(self, kind: str):
         if kind == "http_req":
-            return HttpStream(True)
+            return HttpStream(True, self.methods)
         if kind == "http_resp":
-            return HttpStream(False)
+            return HttpStream(False, self.methods)
         if kind == "tls":
             return TlsStream(self.server_side)
         return SshStream()

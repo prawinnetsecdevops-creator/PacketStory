@@ -27,6 +27,7 @@ import json
 import os
 import struct
 import sys
+from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import BinaryIO
@@ -289,13 +290,15 @@ class Flow:
     tls_hrr: bool = False
 
     _streams: dict = field(default_factory=dict)
+    _http_methods: deque = field(default_factory=lambda: deque(maxlen=1024))  # request methods awaiting a response
     dns_msgs: list = field(default_factory=list)
 
     def _app_data(self, p: TcpPacket, c2s: bool) -> None:
         """Feed the segment to this direction's reassembling application parser."""
         st = self._streams.get(c2s)
         if st is None:
-            st = self._streams[c2s] = AppStream(server_side=not c2s, dns=53 in (p.sport, p.dport))
+            st = self._streams[c2s] = AppStream(server_side=not c2s, dns=53 in (p.sport, p.dport),
+                                                methods=self._http_methods)
         if p.flags & SYN:
             st.syn(p.seq)
         if p.payload or p.lost:
