@@ -8,6 +8,7 @@ TCP flow tracker.
 from __future__ import annotations
 
 import ipaddress
+import os
 import struct
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -646,7 +647,7 @@ class ArpTracker:
 
 # ---------------------------------------------------------------- UDP + orchestration
 
-MAX_UDP_FLOWS = 20_000
+MAX_UDP_FLOWS = int(os.environ.get("PACKETSTORY_MAX_UDP_FLOWS", "1000000"))
 ONE_WAY_OK = {514, 162}  # syslog / SNMP traps are fire-and-forget
 
 

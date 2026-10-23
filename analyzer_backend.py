@@ -25,19 +25,53 @@ import io
 import ipaddress
 import json
 import os
+import shutil
 import struct
 import sys
-from collections import deque
+import tempfile
+import threading
+import uuid
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import BinaryIO
+from urllib.parse import parse_qs, urlparse
 
-from protocols import CaptureError, Extras, parse_other, read_capture, service_for
+from protocols import CaptureError, Extras, _locate, parse_other, read_capture, service_for
 from streams import AppStream
 from summary import build_summary
 
-MAX_UPLOAD = 200 * 1024 * 1024
-MAX_PACKET_ROWS = 5_000
+PAGE_SIZE = 500          # packet rows per page served by /api/packets
+MAX_SESSIONS = 8         # analysis results kept in memory for paging
+
+_sessions: "OrderedDict[str, list]" = OrderedDict()
+_sessions_lock = threading.Lock()
+
+
+def _remember(flows: list) -> str:
+    sid = uuid.uuid4().hex[:12]
+    with _sessions_lock:
+        _sessions[sid] = flows
+        while len(_sessions) > MAX_SESSIONS:
+            _sessions.popitem(last=False)
+    return sid
+
+
+def packet_page(session: str, flow_id: int, offset: int, limit: int) -> dict | None:
+    with _sessions_lock:
+        flows = _sessions.get(session)
+        if flows is not None:
+            _sessions.move_to_end(session)
+    if flows is None or not 1 <= flow_id <= len(flows):
+        return None
+    pk = flows[flow_id - 1].packets
+    offset, limit = max(0, offset), max(1, min(limit, 5000))
+    rows = []
+    for p in pk[offset:offset + limit]:
+        d = p.to_dict()
+        d["flow"] = flow_id
+        rows.append(d)
+    return {"flow": flow_id, "total": len(pk), "offset": offset, "packets": rows}
 
 DLT_NULL, DLT_EN10MB, DLT_RAW, DLT_LINUX_SLL, DLT_IPV4, DLT_IPV6 = 0, 1, 101, 113, 228, 229
 VLAN_TYPES = {0x8100, 0x88A8, 0x9100}
@@ -690,6 +724,28 @@ SIZE_BINS = [(64, "â‰¤64"), (127, "65â€“127"), (255, "128â€“255"),
 DEDUP_WINDOW_S = 0.001
 
 
+def dedup_key(data: bytes, link: int) -> bytes:
+    """Hash of the IP packet with per-hop fields removed (L2 header, TTL/hop limit, IPv4 checksum),
+    so the same packet seen at different points on a path compares equal."""
+    loc = _locate(data, link)
+    if loc and loc[1] in (0x0800, 0x86DD):
+        off, et = loc
+        ip = bytearray(data[off:])
+        if et == 0x0800 and len(ip) >= 20:
+            total = struct.unpack(">H", ip[2:4])[0]
+            if 20 <= total <= len(ip):
+                del ip[total:]  # drop Ethernet padding
+            ip[8] = 0
+            ip[10:12] = b"\0\0"
+        elif et == 0x86DD and len(ip) >= 40:
+            plen = struct.unpack(">H", ip[4:6])[0]
+            if plen and 40 + plen <= len(ip):
+                del ip[40 + plen:]
+            ip[7] = 0
+        return hashlib.blake2b(bytes(ip), digest_size=16).digest()
+    return hashlib.blake2b(data, digest_size=16).digest()
+
+
 def merge_captures(streams: list[BinaryIO]):
     """Interleave several captures by timestamp and drop packets seen by another capture.
 
@@ -704,7 +760,7 @@ def merge_captures(streams: list[BinaryIO]):
     n = 0
     for ts, src, data, link, orig in heapq.merge(*(tagged(i, s) for i, s in enumerate(streams)),
                                                  key=lambda x: x[0]):
-        key = hashlib.blake2b(data, digest_size=16).digest()
+        key = dedup_key(data, link)
         entries = [e for e in recent.get(key, ()) if ts - e[0] < DEDUP_WINDOW_S]
         # an instance already holding this source's copy can't absorb another one from it
         match = next((e for e in entries if src not in e[1]), None)
@@ -729,7 +785,6 @@ def analyze_packets(packets, sources: int = 1) -> dict:
     all_flows: list[Flow] = []
     total = tcp_count = truncated = analyzable = 0
     first = last = None
-    rows: list[dict] = []
     sizes = [0] * len(SIZE_BINS)
     frame_sum = max_frame = tcp_bytes = 0
     talkers: dict[str, list[int]] = {}
@@ -788,10 +843,8 @@ def analyze_packets(packets, sources: int = 1) -> dict:
             extras.dns.feed_tcp(ts_, src_, sport_, dst_, dport_, msg)
         flow.dns_msgs.clear()
         p.payload = b""
-        if len(rows) < MAX_PACKET_ROWS:
-            d = p.to_dict()
-            d["flow"] = flow.id
-            rows.append(d)
+
+    session = _remember(all_flows)
 
     for ptb in icmp_ptb:
         for f in all_flows:
@@ -823,8 +876,8 @@ def analyze_packets(packets, sources: int = 1) -> dict:
         "flow_states": states,
         "flows": summaries,
         "problem_flows": [s["id"] for s in summaries if s["findings"]],
-        "packets": rows,
-        "packets_truncated": tcp_count > len(rows),
+        "session": session,
+        "packet_page_size": PAGE_SIZE,
         "overview": {
             "tcp_payload_bytes": tcp_bytes,
             "total_bytes": frame_sum,
@@ -851,6 +904,24 @@ def analyze_packets(packets, sources: int = 1) -> dict:
 analyze_tcp = analyze_capture  # backwards-compatible name
 
 
+class FileSlice:
+    """Read-only view of bytes [start, start+size) of a file, with its own file handle."""
+
+    def __init__(self, path: str, start: int, size: int) -> None:
+        self._fh = open(path, "rb")
+        self._fh.seek(start)
+        self._left = size
+
+    def read(self, n: int = -1) -> bytes:
+        n = self._left if n is None or n < 0 else min(n, self._left)
+        data = self._fh.read(n)
+        self._left -= len(data)
+        return data
+
+    def close(self) -> None:
+        self._fh.close()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "PacketStory/2.0.2"
 
@@ -871,9 +942,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        if self.path == "/api/health":
+        url = urlparse(self.path)
+        if url.path == "/api/health":
             self._send(200, {"status": "ok"})
-        elif self.path in ("/", "/index.html"):
+        elif url.path == "/api/packets":
+            q = parse_qs(url.query)
+            try:
+                page = packet_page(q.get("session", [""])[0], int(q.get("flow", ["0"])[0]),
+                                   int(q.get("offset", ["0"])[0]), int(q.get("limit", [str(PAGE_SIZE)])[0]))
+            except ValueError:
+                return self._send(400, {"error": "flow, offset and limit must be integers"})
+            if page is None:
+                return self._send(404, {"error": "unknown or expired session/flow; analyze the capture again"})
+            self._send(200, page)
+        elif url.path in ("/", "/index.html"):
             try:
                 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html"), "rb") as fh:
                     body = fh.read()
@@ -896,10 +978,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "invalid Content-Length"})
         if length <= 0:
             return self._send(400, {"error": "empty body; send raw pcap bytes"})
-        if length > MAX_UPLOAD:
-            return self._send(413, {"error": "file too large"})
-        body = self.rfile.read(length)
+        free = shutil.disk_usage(tempfile.gettempdir()).free
+        if length > free - (64 << 20):
+            return self._send(507, {"error": "not enough free disk space for this upload"})
+        tmp = tempfile.NamedTemporaryFile(prefix="packetstory-", suffix=".upload", delete=False)
         try:
+            with tmp:
+                left = length
+                while left:
+                    chunk = self.rfile.read(min(left, 1 << 20))
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+                    left -= len(chunk)
+            if left:
+                return self._send(400, {"error": "upload ended early"})
             if self.path.endswith("/merge"):
                 try:
                     sizes = [int(x) for x in self.headers.get("X-File-Sizes", "").split(",")]
@@ -908,14 +1001,26 @@ class Handler(BaseHTTPRequestHandler):
                 if len(sizes) < 1 or min(sizes) <= 0 or sum(sizes) != length:
                     return self._send(400, {"error": "X-File-Sizes must list each file length and add up to the body"})
                 streams, pos = [], 0
-                for s in sizes:
-                    streams.append(io.BytesIO(body[pos:pos + s]))
-                    pos += s
-                self._send(200, analyze_packets(merge_captures(streams), len(streams)))
+                try:
+                    for s in sizes:
+                        streams.append(FileSlice(tmp.name, pos, s))
+                        pos += s
+                    result = analyze_packets(merge_captures(streams), len(streams))
+                finally:
+                    for st in streams:
+                        st.close()
+                self._send(200, result)
             else:
-                self._send(200, analyze_capture(io.BytesIO(body)))
+                with open(tmp.name, "rb") as fh:
+                    result = analyze_capture(fh)
+                self._send(200, result)
         except CaptureError as exc:
             self._send(400, {"error": str(exc)})
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
 
     def log_message(self, fmt, *args) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))

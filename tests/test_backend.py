@@ -414,6 +414,47 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(count(one, one, one), 1)                   # three captures, same packet
         self.assertEqual(count(a, a, a), 2)
 
+    def test_merge_ignores_ttl_and_l2_across_capture_points(self):
+        def pkt(ttl, mac):
+            raw = ipv4("10.0.0.1", "10.0.0.2", 6, tcp(5000, 80, 100, 0, 2), ttl=ttl)
+            return mac * 2 + b"\x08\x00" + raw
+        a = pcap([(0.0, pkt(64, b"\xaa" * 6)), (0.0003, pkt(64, b"\xaa" * 6))])
+        b = pcap([(0.0002, pkt(61, b"\xbb" * 6)), (0.0004, pkt(61, b"\xbb" * 6))])
+        self.assertEqual(sum(1 for _ in t.merge_captures([io.BytesIO(a), io.BytesIO(b)])), 2)
+        c = pcap([(0.0002, pkt(61, b"\xbb" * 6))])
+        self.assertEqual(sum(1 for _ in t.merge_captures([io.BytesIO(a), io.BytesIO(c)])), 2)
+
+    def test_packet_rows_are_paged_not_capped(self):
+        n = 6000
+        raw = pcap([(i * 0.0001, tcp_pkt("10.0.0.1", "10.0.0.2", 5000, 80, 100 + i, 0, 0x10)) for i in range(n)])
+        r = run(raw)
+        self.assertNotIn("packets", r)
+        page = t.packet_page(r["session"], 1, 5500, 1000)
+        self.assertEqual(page["total"], n)
+        self.assertEqual(len(page["packets"]), n - 5500)
+        self.assertIsNone(t.packet_page("nope", 1, 0, 10))
+
+    def test_upload_is_streamed_to_disk(self):
+        import http.client, threading
+        srv = t.ThreadingHTTPServer(("127.0.0.1", 0), t.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            syn = pcap([(0, tcp_pkt("10.0.0.1", "10.0.0.2", 5000, 80, 100, 0, 2))])
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_port)
+            c.request("POST", "/api/analyze", body=syn)
+            r = c.getresponse()
+            body = __import__("json").loads(r.read())
+            self.assertEqual(r.status, 200)
+            c.request("GET", f"/api/packets?session={body['session']}&flow=1")
+            r = c.getresponse()
+            self.assertEqual(len(__import__("json").loads(r.read())["packets"]), 1)
+            c.request("POST", "/api/analyze/merge", body=syn + syn, headers={"X-File-Sizes": f"{len(syn)},{len(syn)}"})
+            r = c.getresponse()
+            self.assertEqual(r.status, 200)
+            self.assertEqual(__import__("json").loads(r.read())["sources"], 2)
+        finally:
+            srv.shutdown()
+
     def test_malformed_pcapng_is_rejected(self):
         good = pcapng([(0, tcp_pkt("10.0.0.1", "10.0.0.2", 5000, 80, 1, 0, 2))])
         shb_len = struct.unpack("<I", good[4:8])[0]

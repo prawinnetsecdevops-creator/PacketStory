@@ -104,7 +104,7 @@
 <main>
   <div id="drop" tabindex="0">
     <strong>Drop one or more .pcap / .pcapng files here</strong>
-    <small>or click to browse &middot; select multiple files &middot; any port, any IP protocol &middot; max 200 MB each</small>
+    <small>or click to browse &middot; select multiple files &middot; any port, any IP protocol &middot; no size limit</small>
     <button type="button">Choose files</button>
     <input id="file" type="file" accept=".pcap,.cap,.pcapng" multiple hidden>
   </div>
@@ -163,7 +163,6 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">"
 const fmt = v => v == null ? "–" : (typeof v === "number" && !Number.isInteger(v) ? v.toFixed(3) : v);
 const flowBytes = f => f.bytes_client_to_server + f.bytes_server_to_client;
 
-const MAX_BYTES = 200 * 1024 * 1024;
 const files = [];            // {name, size, state: queued|running|done|error, data, error}
 let active = null;           // index into files, or "compare"
 let processing = false;
@@ -175,7 +174,6 @@ function enqueue(fileList) {
   if (!picked.length) return;
   for (const f of picked) {
     const item = { name: f.name, size: f.size, file: f, state: "queued", data: null, error: null };
-    if (f.size > MAX_BYTES) { item.state = "error"; item.error = "File exceeds the 200 MB limit."; item.file = null; }
     files.push(item);
   }
   renderTabs();
@@ -251,7 +249,6 @@ async function mergeAll() {
   const parts = files.filter(f => f.state === "done" && f.file);
   const total = parts.reduce((a, f) => a + f.size, 0);
   if (parts.length < 2) return;
-  if (total > MAX_BYTES) { setStatus("Merged size exceeds the 200 MB limit.", true); return; }
   setStatus(`Merging ${parts.length} captures…`);
   try {
     const res = await fetch("/api/analyze/merge", {
@@ -426,7 +423,6 @@ function toggleDetail(tr) {
   const next = tr.nextElementSibling;
   if (next && next.classList.contains("detail")) { next.remove(); return; }
   const f = data.flows.find(x => x.id == tr.dataset.id);
-  const pk = data.packets.filter(p => p.flow === f.id).slice(0, 200);
   const find = (f.findings.length ? `<ul>${f.findings.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "<p>No problems detected.</p>")
     + (f.notes.length ? `<ul class="notes">${f.notes.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "");
   const pair = (a, b) => `${a ?? "–"} / ${b ?? "–"}`;
@@ -448,14 +444,30 @@ function toggleDetail(tr) {
     ["Longest idle gap (s)", fmt(f.max_idle_gap)], ["Throughput (kbps)", fmt(f.throughput_kbps)],
   ].map(([k, v]) => `<div><span>${k}</span><b>${esc(v)}</b></div>`).join("");
   const t0 = f.start;
-  const body = pk.map(p => `<tr><td>${p.no}</td><td>${(p.time - t0).toFixed(6)}</td>
+  const pkRow = p => `<tr><td>${p.no}</td><td>${(p.time - t0).toFixed(6)}</td>
     <td class="mono">${esc(p.src)}:${p.sport} → ${esc(p.dst)}:${p.dport}</td>
     <td>${esc(p.flags)}</td><td>${p.seq}</td><td>${p.ack}</td><td>${p.window}</td><td>${p.len}</td>
-    <td>${p.frame}</td><td>${p.ip_len}</td><td>${p.ttl}</td><td>${p.df ? "DF" : ""}</td></tr>`).join("");
-  const note = data.packets_truncated ? "<p>Packet list was truncated by the server (5,000 max).</p>" : "";
-  tr.insertAdjacentHTML("afterend", `<tr class="detail"><td colspan="${COLS.length}">${find}<div class="stats">${stats}</div>${note}
+    <td>${p.frame}</td><td>${p.ip_len}</td><td>${p.ttl}</td><td>${p.df ? "DF" : ""}</td></tr>`;
+  tr.insertAdjacentHTML("afterend", `<tr class="detail"><td colspan="${COLS.length}">${find}<div class="stats">${stats}</div>
     <table><thead><tr><th>No</th><th>Time (s)</th><th>Direction</th><th>Flags</th><th>Seq</th><th>Ack</th><th>Win</th><th>Len</th><th>Frame</th><th>IP len</th><th>TTL</th><th>DF</th></tr></thead>
-    <tbody>${body}</tbody></table></td></tr>`);
+    <tbody></tbody></table><p class="pk-info"></p><button class="pk-more" hidden>Load more packets</button></td></tr>`);
+  const det = tr.nextElementSibling, tbody = det.querySelector("tbody"), info = det.querySelector(".pk-info"), more = det.querySelector(".pk-more");
+  const session = data.session; let offset = 0;
+  async function loadPage() {
+    more.disabled = true;
+    try {
+      const res = await fetch(`/api/packets?session=${session}&flow=${f.id}&offset=${offset}&limit=${data.packet_page_size || 500}`);
+      const page = await res.json();
+      if (!res.ok) throw new Error(page.error || res.statusText);
+      tbody.insertAdjacentHTML("beforeend", page.packets.map(pkRow).join(""));
+      offset += page.packets.length;
+      info.textContent = `Showing ${offset} of ${page.total} packets`;
+      more.hidden = offset >= page.total;
+    } catch (e) { info.textContent = "Could not load packets: " + e.message; more.hidden = true; }
+    more.disabled = false;
+  }
+  more.addEventListener("click", loadPage);
+  loadPage();
 }
 
 const drop = $("drop");
