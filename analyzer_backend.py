@@ -274,7 +274,7 @@ class Flow:
     _pending: dict = field(default_factory=dict)
     _bh_first: dict = field(default_factory=dict)
     _bh_unacked: dict = field(default_factory=dict)
-    small_ok: int = 0
+    min_acked: int | None = None  # smallest data segment that was acknowledged
     first_data_c2s: float | None = None
     first_data_s2c: float | None = None
     ptb_mtu: int | None = None
@@ -373,8 +373,7 @@ class Flow:
             if sent and p.ack in sent:
                 t0, size = sent.pop(p.ack)
                 self.rtt_samples.append((p.time - t0) * 1000)
-                if size <= 0.5 * self.max_payload:
-                    self.small_ok += 1  # a small data segment was delivered and acknowledged
+                self.min_acked = size if self.min_acked is None else min(self.min_acked, size)
             stuck = self._bh_unacked.get(not c2s)
             if stuck:
                 for end in [e for e in stuck if ((p.ack - e) & 0xFFFFFFFF) < 0x7FFFFFFF]:
@@ -512,12 +511,19 @@ class Flow:
         if self.ptb_mtu:
             out.append(f"ICMP 'fragmentation needed / packet too big' received: path MTU is {self.ptb_mtu}.")
         stuck = sum(n for d in self._bh_unacked.values() for n in d.values())
-        # small packets passing: the handshake completed, or small data segments were acknowledged
-        small_ok = self.small_ok or (self.syn_time is not None and self.ack_time is not None)
-        if stuck >= 2 and small_ok:
+        # Strong evidence of a size problem: small data was acknowledged on this flow, or a router
+        # reported "packet too big". A completed handshake alone only shows the path works at all.
+        small_ok = self.min_acked is not None and self.min_acked <= 0.5 * self.max_payload
+        strong = small_ok or self.ptb_mtu
+        handshake_ok = self.syn_time is not None and self.ack_time is not None
+        if stuck >= 2 and strong:
             out.append("Possible PMTU black hole: full-size DF segments were retransmitted and never acknowledged, "
-                       "while smaller packets (handshake / small segments) got through. "
+                       "while smaller segments were delivered or a router reported the packet was too big. "
                        "Try lowering MTU / clamping MSS.")
+        elif stuck >= 2 and handshake_ok:
+            out.append("PMTU suspected (lower confidence): full-size DF segments were retransmitted without "
+                       "acknowledgement after a successful handshake, but no small data segment was acknowledged "
+                       "to prove a size dependence. This could also be ordinary loss or a stalled peer.")
         elif stuck >= 2:
             out.append("Full-size DF segments were retransmitted without acknowledgement, but no smaller traffic "
                        "succeeded to confirm a size problem: more likely ordinary loss or a stalled peer "

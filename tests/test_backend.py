@@ -436,14 +436,27 @@ class V2Tests(unittest.TestCase):
         f = run(pcap([big(0.0), big(1.0), big(3.0)]))["flows"][0]
         self.assertFalse(any("black hole: " in x for x in f["findings"]))
         self.assertTrue(any("low confidence" in x for x in f["findings"]))
-        # same, but the handshake completed first: black hole is reported
+        # large segment repeated after a completed handshake only: suspected, not a critical black hole
         hs = [(0.0, tcp_pkt(c, s, 40000, 80, 100, 0, 2)),
               (0.01, tcp_pkt(s, c, 80, 40000, 500, 101, 0x12)),
               (0.02, tcp_pkt(c, s, 40000, 80, 101, 501, 0x10))]
         r = run(pcap(hs + [big(0.03), big(1.0), big(3.0)]))
+        fl = r["flows"][0]["findings"]
+        self.assertFalse(any("black hole" in x for x in fl))
+        self.assertTrue(any("PMTU suspected" in x for x in fl))
+        mtu = [i for i in r["summary"]["issues"] if i["category"] == "MTU"]
+        self.assertEqual(len(mtu), 1)
+        self.assertEqual(mtu[0]["severity"], "medium")
+        self.assertIn("suspected", mtu[0]["title"])
+        self.assertTrue(all(i["severity"] != "critical" for i in r["summary"]["issues"]))
+        # a small data segment acknowledged, then the large one repeated: size-dependent, critical
+        small = (0.025, tcp_pkt(c, s, 40000, 80, 101, 501, 0x18, payload=b"s" * 50))
+        ack = (0.028, tcp_pkt(s, c, 80, 40000, 501, 151, 0x10))
+        bigs = lambda t: (t, tcp_pkt(c, s, 40000, 80, 151, 501, 0x10, payload=b"x" * 1400))
+        r = run(pcap(hs + [small, ack, bigs(0.03), bigs(1.0), bigs(3.0)]))
         self.assertTrue(any("black hole: " in x for x in r["flows"][0]["findings"]))
         self.assertEqual(r["summary"]["issues"][0]["severity"], "critical")
-        # large segment eventually acknowledged: no black hole
+        # large segment eventually acknowledged: no PMTU finding
         ok = run(pcap(hs + [big(0.03), big(1.0), big(3.0),
                             (3.1, tcp_pkt(s, c, 80, 40000, 501, 1501, 0x10))]))["flows"][0]
         self.assertFalse(any("PMTU" in x for x in ok["findings"]))
