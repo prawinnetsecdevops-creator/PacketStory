@@ -241,6 +241,8 @@ class Flow:
     zero_windows: int = 0
     dup_acks: int = 0
     syn_time: float | None = None
+    syn_seq: int | None = None
+    synack_seq: int | None = None
     synack_time: float | None = None
     ack_time: float | None = None
     fin_seen: bool = False
@@ -371,9 +373,9 @@ class Flow:
         if p.window == 0 and not p.flags & (SYN | RST):
             self.zero_windows += 1
         if p.flags & SYN and not p.flags & ACK and self.syn_time is None:
-            self.syn_time = p.time
+            self.syn_time, self.syn_seq = p.time, p.seq
         elif p.flags & SYN and p.flags & ACK and self.synack_time is None:
-            self.synack_time = p.time
+            self.synack_time, self.synack_seq = p.time, p.seq
         elif (p.flags & ACK and c2s and self.synack_time is not None and self.ack_time is None
               and not p.flags & SYN):
             self.ack_time = p.time
@@ -551,6 +553,24 @@ def _orient(p: TcpPacket) -> tuple[tuple[str, int], tuple[str, int]]:
     return (a, b) if p.dport < p.sport else (b, a)
 
 
+IDLE_NEW_CONNECTION_S = 300.0  # a closed/reset flow silent this long is considered finished
+
+
+def starts_new_connection(flow: Flow, p: TcpPacket) -> bool:
+    """True if p begins a new connection on a 4-tuple that `flow` already used.
+
+    A retransmitted SYN/SYN-ACK carries the same initial sequence number and stays in the flow.
+    """
+    if p.flags & SYN:
+        if p.flags & ACK:
+            return flow.synack_seq is not None and p.seq != flow.synack_seq
+        if flow.syn_seq is None:
+            return True  # flow was picked up midstream, so a SYN is a fresh handshake
+        return p.seq != flow.syn_seq or bool((flow.resets or flow.fin_seen) and flow.ack_time is not None)
+    ended = bool(flow.resets or flow.fin_seen)
+    return ended and not p.flags & RST and (p.time - flow.packets[-1].time) > IDLE_NEW_CONNECTION_S
+
+
 SIZE_BINS = [(64, "â‰¤64"), (127, "65â€“127"), (255, "128â€“255"), (511, "256â€“511"),
              (1023, "512â€“1023"), (1399, "1024â€“1399"), (1500, "1400â€“1500"), (10**9, ">1500")]
 
@@ -576,7 +596,8 @@ def analyze_capture(stream: BinaryIO) -> dict:
 
 
 def analyze_packets(packets, sources: int = 1) -> dict:
-    flows: dict[frozenset, Flow] = {}
+    current: dict[frozenset, Flow] = {}  # 4-tuple -> its latest connection
+    all_flows: list[Flow] = []
     total = tcp_count = truncated = 0
     first = last = None
     rows: list[dict] = []
@@ -626,10 +647,11 @@ def analyze_packets(packets, sources: int = 1) -> dict:
         extras.count("TCP", flen, service_for(p.sport, p.dport) or "Other TCP")
         talk(p.src, p.dst, flen)
         key = frozenset([(p.src, p.sport), (p.dst, p.dport)])
-        flow = flows.get(key)
-        if flow is None:
+        flow = current.get(key)
+        if flow is None or starts_new_connection(flow, p):
             client, server = _orient(p)
-            flow = flows[key] = Flow(len(flows) + 1, client, server)
+            flow = current[key] = Flow(len(all_flows) + 1, client, server)
+            all_flows.append(flow)
         retrans_before = flow.retransmissions
         flow.add(p)
         if p.dport == 53 or p.sport == 53:
@@ -642,12 +664,12 @@ def analyze_packets(packets, sources: int = 1) -> dict:
             rows.append(d)
 
     for ptb in icmp_ptb:
-        for f in flows.values():
+        for f in all_flows:
             if ptb["original_destination"] in (f.client[0], f.server[0]):
                 f.ptb_mtu = ptb["next_hop_mtu"]
 
-    summaries = [f.summary() for f in flows.values()]
-    for f, s in zip(flows.values(), summaries):
+    summaries = [f.summary() for f in all_flows]
+    for f, s in zip(all_flows, summaries):
         extras.add_port("TCP", f.server[1], len(f.packets), f.frame_sum, bool(s["findings"]), f.resets)
     states: dict[str, int] = {}
     for s in summaries:

@@ -234,6 +234,42 @@ class V2Tests(unittest.TestCase):
                       (0.02, tcp_pkt("10.0.0.1", "10.0.0.2", 5000, 80, 101, 501, 0x10))]))
         self.assertEqual(r["summary"]["health"], "healthy")
 
+    def test_reset_then_new_syn_is_separate_flows(self):
+        c, s = "10.0.0.1", "10.0.0.2"
+        r = run(pcap([
+            (0.0, tcp_pkt(c, s, 40000, 80, 100, 0, 2)),
+            (0.01, tcp_pkt(s, c, 80, 40000, 500, 101, 0x12)),
+            (0.02, tcp_pkt(c, s, 40000, 80, 101, 501, 0x10)),
+            (0.03, tcp_pkt(s, c, 80, 40000, 501, 101, 0x04)),
+            (1.0, tcp_pkt(c, s, 40000, 80, 9000, 0, 2)),
+            (1.01, tcp_pkt(s, c, 80, 40000, 7000, 9001, 0x12)),
+            (1.02, tcp_pkt(c, s, 40000, 80, 9001, 7001, 0x10)),
+        ]))
+        self.assertEqual(len(r["flows"]), 2)
+        self.assertEqual([f["state"] for f in r["flows"]], ["reset", "established"])
+        self.assertEqual(r["flows"][1]["resets"], 0)
+
+    def test_retransmitted_syn_stays_in_one_flow(self):
+        c, s = "10.0.0.1", "10.0.0.2"
+        r = run(pcap([(0.0, tcp_pkt(c, s, 40000, 80, 100, 0, 2)),
+                      (1.0, tcp_pkt(c, s, 40000, 80, 100, 0, 2)),
+                      (1.01, tcp_pkt(s, c, 80, 40000, 500, 101, 0x12)),
+                      (1.02, tcp_pkt(s, c, 80, 40000, 500, 101, 0x12))]))
+        self.assertEqual(len(r["flows"]), 1)
+        self.assertEqual(r["flows"][0]["retransmissions"], 2)
+
+    def test_fin_close_then_port_reuse(self):
+        c, s = "10.0.0.1", "10.0.0.2"
+        r = run(pcap([
+            (0.0, tcp_pkt(c, s, 40000, 80, 100, 0, 2)),
+            (0.01, tcp_pkt(s, c, 80, 40000, 500, 101, 0x12)),
+            (0.02, tcp_pkt(c, s, 40000, 80, 101, 501, 0x10)),
+            (0.03, tcp_pkt(c, s, 40000, 80, 101, 501, 0x11)),
+            (2.0, tcp_pkt(c, s, 40000, 80, 777, 0, 2)),
+            (2.01, tcp_pkt(s, c, 80, 40000, 888, 778, 0x12)),
+        ]))
+        self.assertEqual(len(r["flows"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
