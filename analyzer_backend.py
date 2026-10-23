@@ -852,7 +852,7 @@ analyze_tcp = analyze_capture  # backwards-compatible name
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PacketStory/2.0.1"
+    server_version = "PacketStory/2.0.2"
 
     def _send(self, code: int, obj: dict) -> None:
         body = json.dumps(obj).encode()
