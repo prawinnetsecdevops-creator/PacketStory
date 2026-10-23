@@ -54,7 +54,9 @@ def main() -> None:
             profile = tempfile.mkdtemp(prefix="packetstory-")
             try:
                 subprocess.run([browser, f"--app={url}", f"--user-data-dir={profile}",
-                                "--window-size=1280,860", "--no-first-run", "--no-default-browser-check"])
+                                "--window-size=1280,860", "--no-first-run", "--no-default-browser-check",
+                                "--disable-sync", "--disable-features=msImplicitSignin,msEdgeSyncConsent,msEdgeOnRampFRE,msEdgeOnRampImport",
+                                "--disable-signin-promo"])
             finally:
                 shutil.rmtree(profile, ignore_errors=True)
         else:
