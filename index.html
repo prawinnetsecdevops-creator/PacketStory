@@ -139,11 +139,24 @@
 
 <script>
 const $ = id => document.getElementById(id);
+// One definition drives headers, cells and sorting: [key, label, value(f), cell html(f, value)]
 const COLS = [
-  ["id","#"],["client","Client"],["server","Server"],["application","App"],["state","State"],["packets","Pkts"],
-  ["bytes","Bytes"],["max_frame_size","Max frame"],["mtu_from_mss","MTU (MSS)"],["handshake_rtt_ms","RTT (ms)"],
-  ["retransmission_pct","Retrans %"],["resets","RST"],["zero_windows","Zero-win"],["duration","Duration (s)"]
+  ["id", "#", f => f.id],
+  ["client", "Client", f => f.client, (f, v) => `<td class="mono">${esc(v)}</td>`],
+  ["server", "Server", f => f.server, (f, v) => `<td class="mono">${esc(v)}</td>`],
+  ["application", "App", f => f.application, (f, v) => `<td>${esc(v ?? "–")}</td>`],
+  ["state", "State", f => f.state, (f, v) => `<td><span class="pill ${esc(v)}">${esc(v)}</span></td>`],
+  ["packets", "Pkts", f => f.packets],
+  ["bytes", "Bytes", f => f.bytes_client_to_server + f.bytes_server_to_client],
+  ["max_frame_size", "Max frame", f => f.max_frame_size],
+  ["mtu_from_mss", "MTU (MSS)", f => f.mtu_from_mss],
+  ["handshake_rtt_ms", "RTT (ms)", f => f.handshake_rtt_ms],
+  ["retransmission_pct", "Retrans %", f => f.retransmission_pct],
+  ["resets", "RST", f => f.resets],
+  ["zero_windows", "Zero-win", f => f.zero_windows],
+  ["duration", "Duration (s)", f => f.duration],
 ];
+const COLMAP = Object.fromEntries(COLS.map(c => [c[0], c]));
 let data = null, sortKey = "id", sortDir = 1;
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -395,7 +408,7 @@ function render() {
 
 function drawRows() {
   const q = $("q").value.trim().toLowerCase(), st = $("stateFilter").value, po = $("onlyProblems").checked;
-  const val = f => sortKey === "bytes" ? flowBytes(f) : f[sortKey];
+  const val = f => COLMAP[sortKey][2](f);
   const list = data.flows.filter(f =>
     (!q || (f.client + " " + f.server).toLowerCase().includes(q)) &&
     (!st || f.state === st) && (!po || f.findings.length));
@@ -403,14 +416,10 @@ function drawRows() {
     const x = val(a), y = val(b);
     return (x == null ? -1 : y == null ? 1 : x < y ? -1 : x > y ? 1 : 0) * sortDir;
   });
-  $("rows").innerHTML = list.map(f => `
-    <tr class="flow" data-id="${f.id}">
-      <td>${f.id}</td><td class="mono">${esc(f.client)}</td><td class="mono">${esc(f.server)}</td>
-            <td>${esc(f.application ?? "–")}</td>
-            <td><span class="pill ${esc(f.state)}">${esc(f.state)}</span></td>
-      <td>${f.packets}</td><td>${flowBytes(f)}</td><td>${fmt(f.handshake_rtt_ms)}</td>
-      <td>${f.retransmissions}</td><td>${f.resets}</td><td>${f.zero_windows}</td><td>${fmt(f.duration)}</td>
-    </tr>`).join("") || `<tr><td colspan="${COLS.length}">No flows match.</td></tr>`;
+  $("rows").innerHTML = list.map(f => `<tr class="flow" data-id="${f.id}">${COLS.map(([, , get, cell]) => {
+    const v = get(f);
+    return cell ? cell(f, v) : `<td>${fmt(v)}</td>`;
+  }).join("")}</tr>`).join("") || `<tr><td colspan="${COLS.length}">No flows match.</td></tr>`;
 }
 
 function toggleDetail(tr) {
