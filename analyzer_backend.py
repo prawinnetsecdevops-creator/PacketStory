@@ -40,11 +40,14 @@ from urllib.parse import parse_qs, urlparse
 from protocols import CaptureError, Extras, _locate, parse_other, read_capture, service_for
 from streams import AppStream
 from summary import build_summary
+from tlscrypt import HAVE_CRYPTO, TlsContext, fmt_time, hostname_matches, parse_keylog
 
 PAGE_SIZE = 500          # packet rows per page served by /api/packets
 MAX_SESSIONS = 8         # analysis results kept in memory for paging
 
 _sessions: "OrderedDict[str, list]" = OrderedDict()
+_keylogs: "OrderedDict[str, dict]" = OrderedDict()
+MAX_KEYLOG_BYTES = 256 * 1024 * 1024
 _sessions_lock = threading.Lock()
 
 
@@ -322,17 +325,27 @@ class Flow:
     tls_alpn: list = field(default_factory=list)
     server_hello: bool = False
     tls_hrr: bool = False
+    tls_decrypted: bool = False
+    tls_certs: list = field(default_factory=list)
+    keylog: dict | None = None
 
+    _tls_ctx: object = None
     _streams: dict = field(default_factory=dict)
     _http_methods: deque = field(default_factory=lambda: deque(maxlen=1024))  # request methods awaiting a response
     dns_msgs: list = field(default_factory=list)
+
+    @property
+    def is_dot(self) -> bool:
+        return 853 in (self.client[1], self.server[1])
 
     def _app_data(self, p: TcpPacket, c2s: bool) -> None:
         """Feed the segment to this direction's reassembling application parser."""
         st = self._streams.get(c2s)
         if st is None:
+            if self._tls_ctx is None:
+                self._tls_ctx = TlsContext(self.keylog, self.is_dot, self._http_methods)
             st = self._streams[c2s] = AppStream(server_side=not c2s, dns=53 in (p.sport, p.dport),
-                                                methods=self._http_methods)
+                                                methods=self._http_methods, tls=self._tls_ctx)
         if p.flags & SYN:
             st.syn(p.seq)
         if p.payload or p.lost:
@@ -343,7 +356,18 @@ class Flow:
 
     def _app_event(self, kind: str, v, p: TcpPacket) -> None:
         if kind == "dns":
-            self.dns_msgs.append((p.time, p.src, p.sport, p.dst, p.dport, v))
+            self.dns_msgs.append((p.time, p.src, p.sport, p.dst, p.dport, v, "tcp"))
+        elif kind == "dot_dns":
+            self.dns_msgs.append((p.time, p.src, p.sport, p.dst, p.dport, v, "tls"))
+        elif kind == "tls_decrypted":
+            self.tls_decrypted = True
+        elif kind == "tls_cert":
+            if len(self.tls_certs) < 4:
+                self.tls_certs.append(v)
+        elif kind == "https_req":
+            self.http_requests += 1
+        elif kind == "https_resp":
+            self.http_status[v] = self.http_status.get(v, 0) + 1
         elif kind == "tls_alert":
             self.tls_alert = self.tls_alert or v
         elif kind == "http_req":
@@ -364,6 +388,20 @@ class Flow:
         elif kind == "ssh":
             if self.app is None:
                 self.app, self.app_detail = "SSH", v
+
+    def _cert_findings(self) -> list[str]:
+        cert = next((c for c in self.tls_certs if c["role"] == "server" and c["parsed"]), None)
+        if cert is None or not self.packets:
+            return []
+        now, out, name = self.packets[0].time, [], cert["subject"]
+        if cert["not_after"] < now:
+            out.append(f"TLS certificate for {name} had expired on {fmt_time(cert['not_after'])} (before this capture).")
+        elif cert["not_before"] > now:
+            out.append(f"TLS certificate for {name} is not valid until {fmt_time(cert['not_before'])}.")
+        names = cert["names"] or [cert["subject"]]
+        if self.app_detail and not hostname_matches(self.app_detail, names):
+            out.append(f"TLS certificate for {name} does not match the requested name {self.app_detail}.")
+        return out
 
     def state(self) -> str:
         if self.resets:
@@ -535,6 +573,7 @@ class Flow:
             out.append(f"Deprecated {self.tls_version} negotiated: modern clients/servers may refuse it.")
         if self.tls_hrr:
             out.append("TLS HelloRetryRequest: server rejected the client's key share (extra round trip).")
+        out += self._cert_findings()
         if self.retransmissions:
             out.append(f"{self.retransmissions} retransmission(s): possible packet loss.")
         if self.reordered:
@@ -667,11 +706,16 @@ class Flow:
             "throughput_kbps": round((self.bytes_c2s + self.bytes_s2c) * 8 / 1000 / duration, 2) if duration > 0 else None,
             "findings": self.findings(),
             "notes": self.notes(),
-            "application": self.app or service_for(self.client[1], self.server[1]),
+            "application": ("DNS-over-TLS" if self.is_dot and self.app in (None, "TLS")
+                            else self.app or service_for(self.client[1], self.server[1])),
             "app_detail": self.app_detail,
             "tls_version": self.tls_version,
             "tls_alpn": self.tls_alpn,
-            "tls13_encrypted": self.tls_version == "TLS 1.3",
+            "tls13_encrypted": self.tls_version == "TLS 1.3" and not self.tls_decrypted,
+            "tls_decrypted": self.tls_decrypted,
+            "tls_decryption": getattr(self._tls_ctx, "status", None),
+            "tls_certs": self.tls_certs,
+            "dot": self.is_dot and self.app in (None, "TLS"),
             "http_requests": self.http_requests,
             "http_status": {str(k): v for k, v in self.http_status.items()},
         }
@@ -776,11 +820,11 @@ def merge_captures(streams: list[BinaryIO]):
         yield n, ts, data, link, orig
 
 
-def analyze_capture(stream: BinaryIO) -> dict:
-    return analyze_packets(read_capture(stream))
+def analyze_capture(stream: BinaryIO, keylog: dict | None = None) -> dict:
+    return analyze_packets(read_capture(stream), keylog=keylog)
 
 
-def analyze_packets(packets, sources: int = 1) -> dict:
+def analyze_packets(packets, sources: int = 1, keylog: dict | None = None) -> dict:
     current: dict[frozenset, Flow] = {}  # 4-tuple -> its latest connection
     all_flows: list[Flow] = []
     total = tcp_count = truncated = analyzable = 0
@@ -836,11 +880,13 @@ def analyze_packets(packets, sources: int = 1) -> dict:
         flow = current.get(key)
         if flow is None or starts_new_connection(flow, p):
             client, server = _orient(p)
-            flow = current[key] = Flow(len(all_flows) + 1, client, server)
+            flow = current[key] = Flow(len(all_flows) + 1, client, server, keylog=keylog)
             all_flows.append(flow)
         flow.add(p)
-        for ts_, src_, sport_, dst_, dport_, msg in flow.dns_msgs:
-            extras.dns.feed_tcp(ts_, src_, sport_, dst_, dport_, msg)
+        for ts_, src_, sport_, dst_, dport_, msg, transport in flow.dns_msgs:
+            if transport == "tls":  # DNS-over-TLS: match on the standard port so one tracker covers every transport
+                sport_, dport_ = (53 if sport_ == 853 else sport_), (53 if dport_ == 853 else dport_)
+            extras.dns.feed_tcp(ts_, src_, sport_, dst_, dport_, msg, transport)
         flow.dns_msgs.clear()
         p.payload = b""
 
@@ -852,6 +898,10 @@ def analyze_packets(packets, sources: int = 1) -> dict:
                 f.ptb_mtu = ptb["next_hop_mtu"]
 
     summaries = [f.summary() for f in all_flows]
+    for f in all_flows:  # parsers are no longer needed; keep only the packets for paging
+        f._streams.clear()
+        f._tls_ctx = None
+        f.keylog = None
     for f, s in zip(all_flows, summaries):
         extras.add_port("TCP", f.server[1], len(f.packets), f.frame_sum, bool(s["findings"]), f.resets)
     states: dict[str, int] = {}
@@ -861,6 +911,24 @@ def analyze_packets(packets, sources: int = 1) -> dict:
     total_retrans = sum(s["retransmissions"] for s in summaries)
     mtus = [s["mtu_from_mss"] for s in summaries if s["mtu_from_mss"]]
     notes = []
+    if sources > 1:
+        notes.append(f"{sources} captures merged: a packet seen at several capture points is counted once "
+                     "(matched ignoring MAC addresses, TTL/hop limit and IPv4 checksum).")
+    dot = [s for s in summaries if s["dot"]]
+    if dot:
+        decoded = sum(1 for s in dot if s["tls_decrypted"])
+        servers = sorted({s["server"].rsplit(":", 1)[0] for s in dot})
+        notes.append(f"DNS-over-TLS: {len(dot)} flow(s) to {', '.join(servers[:5])}"
+                     + (f"; {decoded} decrypted ({extras.dns.dot_msgs} DNS messages decoded)."
+                        if decoded else "; contents are encrypted. Supply an SSLKEYLOGFILE to decode the queries."))
+    if keylog:
+        enc = [s["id"] for s in summaries if s["application"] != "DNS-over-TLS" and s["tls_version"] and not s["tls_decrypted"]
+               and s["tls_decryption"]]
+        if enc:
+            notes.append(f"{len(enc)} TLS flow(s) could not be decrypted with the supplied key log "
+                         f"(first: #{enc[0]}: {summaries[enc[0] - 1]['tls_decryption']}).")
+    elif any(s["tls13_encrypted"] for s in summaries):
+        notes.append("TLS 1.3 hides certificates and alerts; supply an SSLKEYLOGFILE to see them.")
     if truncated:
         notes.append(f"{truncated} packet(s) were truncated by the capture snaplen; "
                      "sizes use the original on-wire length but payload analysis may be incomplete.")
@@ -923,7 +991,7 @@ class FileSlice:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PacketStory/2.0.2"
+    server_version = "PacketStory/2.1.0"
 
     def _send(self, code: int, obj: dict) -> None:
         body = json.dumps(obj).encode()
@@ -970,8 +1038,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self) -> None:
+        if self.path == "/api/keylog":
+            return self._post_keylog()
         if self.path not in ("/api/analyze", "/api/analyze/tcp", "/api/analyze/merge"):
             return self._send(404, {"error": "not found"})
+        keylog = _keylogs.get(self.headers.get("X-Keylog-Id", ""))
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -1005,14 +1076,14 @@ class Handler(BaseHTTPRequestHandler):
                     for s in sizes:
                         streams.append(FileSlice(tmp.name, pos, s))
                         pos += s
-                    result = analyze_packets(merge_captures(streams), len(streams))
+                    result = analyze_packets(merge_captures(streams), len(streams), keylog)
                 finally:
                     for st in streams:
                         st.close()
                 self._send(200, result)
             else:
                 with open(tmp.name, "rb") as fh:
-                    result = analyze_capture(fh)
+                    result = analyze_capture(fh, keylog)
                 self._send(200, result)
         except CaptureError as exc:
             self._send(400, {"error": str(exc)})
@@ -1021,6 +1092,24 @@ class Handler(BaseHTTPRequestHandler):
                 os.unlink(tmp.name)
             except OSError:
                 pass
+
+    def _post_keylog(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return self._send(400, {"error": "invalid Content-Length"})
+        if not 0 < length <= MAX_KEYLOG_BYTES:
+            return self._send(400, {"error": "key log must be between 1 byte and 256 MB"})
+        keys = parse_keylog(self.rfile.read(length).decode("utf-8", "replace"))
+        if not keys:
+            return self._send(400, {"error": "no TLS secrets found: expected NSS key log lines "
+                                             "(e.g. CLIENT_TRAFFIC_SECRET_0 <client_random> <secret>)"})
+        kid = uuid.uuid4().hex[:12]
+        with _sessions_lock:
+            _keylogs[kid] = keys
+            while len(_keylogs) > 4:
+                _keylogs.popitem(last=False)
+        self._send(200, {"id": kid, "sessions": len(keys), "decryption_available": HAVE_CRYPTO})
 
     def log_message(self, fmt, *args) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -1031,13 +1120,18 @@ def main() -> None:
     ap.add_argument("pcap", nargs="*", help="analyze file(s) and print JSON instead of serving; several are merged")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--keylog", metavar="FILE", help="SSLKEYLOGFILE used to decrypt TLS (needs 'cryptography')")
     args = ap.parse_args()
     if args.pcap:
         try:
+            keylog = None
+            if args.keylog:
+                with open(args.keylog, encoding="utf-8", errors="replace") as fh:
+                    keylog = parse_keylog(fh.read())
             handles = [open(p, "rb") for p in args.pcap]
             try:
-                result = analyze_capture(handles[0]) if len(handles) == 1 else \
-                    analyze_packets(merge_captures(handles), len(handles))
+                result = analyze_capture(handles[0], keylog) if len(handles) == 1 else \
+                    analyze_packets(merge_captures(handles), len(handles), keylog)
             finally:
                 for h in handles:
                     h.close()

@@ -93,6 +93,11 @@ def _tcp_issues(r: dict) -> list[dict]:
         out.append(_issue("high", "TLS", f"{len(nohello)} TLS handshake(s) got no ServerHello",
                           "The ClientHello was sent but the server never started the handshake.",
                           "Look for SNI filtering, TLS inspection or an overloaded server.", nohello))
+    certs = ids(lambda f: has(f, "TLS certificate"))
+    if certs:
+        out.append(_issue("high", "TLS", f"Certificate problems in {len(certs)} flow(s)",
+                          "A server certificate is expired, not yet valid, or does not match the requested name.",
+                          "Renew or replace the certificate, and check the name clients use and the system clock.", certs))
     old = ids(lambda f: has(f, "Deprecated"))
     if old:
         out.append(_issue("low", "TLS", f"{len(old)} flow(s) use deprecated TLS/SSL",

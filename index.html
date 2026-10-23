@@ -71,6 +71,8 @@
   details.sec > summary small { color:var(--mute); font-weight:400; margin-left:10px; }
   .badge { float:right; background:#713f12; color:var(--warn); border-radius:99px; padding:1px 10px; font-size:12px; }
   .mute { color:var(--mute); margin:4px 0 10px; }
+  #keys { display:flex; gap:10px; align-items:center; margin:10px 0; flex-wrap:wrap; }
+  #keys .mute { margin:0; }
   details.sec table { background:transparent; margin-bottom:10px; }
   .bar i { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   [hidden] { display:none !important; }
@@ -107,6 +109,11 @@
     <small>or click to browse &middot; select multiple files &middot; any port, any IP protocol &middot; no size limit</small>
     <button type="button">Choose files</button>
     <input id="file" type="file" accept=".pcap,.cap,.pcapng" multiple hidden>
+  </div>
+  <div id="keys">
+    <button type="button" id="keyBtn" title="Decrypt TLS (certificates, alerts, DNS-over-TLS) using an SSLKEYLOGFILE">Add TLS key log</button>
+    <input id="keyfile" type="file" hidden>
+    <span id="keyStatus" class="mute">Optional: load an SSLKEYLOGFILE to decrypt TLS 1.2/1.3 traffic.</span>
   </div>
   <div id="status"></div>
   <div id="tabs" class="tabs" hidden></div>
@@ -164,6 +171,27 @@ const fmt = v => v == null ? "–" : (typeof v === "number" && !Number.isInteger
 const flowBytes = f => f.bytes_client_to_server + f.bytes_server_to_client;
 
 const files = [];            // {name, size, state: queued|running|done|error, data, error}
+let keylogId = null;         // server-side id of the uploaded SSLKEYLOGFILE
+const keyHeaders = () => keylogId ? { "X-Keylog-Id": keylogId } : {};
+
+async function loadKeylog(file) {
+  $("keyStatus").textContent = `Reading ${file.name}…`;
+  try {
+    const res = await fetch("/api/keylog", { method: "POST", body: file });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    keylogId = body.id;
+    $("keyStatus").textContent = `Key log loaded: ${body.sessions} TLS session(s)` +
+      (body.decryption_available ? "." : ". The 'cryptography' package is not installed, so nothing can be decrypted.");
+    let again = 0;
+    for (const f of files) if (f.file && f.state !== "running") { f.state = "queued"; f.data = null; f.error = null; again++; }
+    if (again) { renderTabs(); processQueue(); }
+  } catch (e) {
+    $("keyStatus").textContent = "Key log rejected: " + e.message;
+  }
+}
+$("keyBtn").addEventListener("click", () => $("keyfile").click());
+$("keyfile").addEventListener("change", e => { if (e.target.files[0]) loadKeylog(e.target.files[0]); e.target.value = ""; });
 let active = null;           // index into files, or "compare"
 let processing = false;
 
@@ -190,7 +218,7 @@ async function processQueue() {
       renderTabs();
       setStatus(`Analyzing ${item.name} (${(item.size/1048576).toFixed(1)} MB)… ${files.filter(x => x.state === "queued").length} more queued`);
       try {
-        const res = await fetch("/api/analyze", { method: "POST", body: item.file });
+        const res = await fetch("/api/analyze", { method: "POST", headers: keyHeaders(), body: item.file });
         const body = await res.json();
         if (!res.ok) throw new Error(body.error || res.statusText);
         item.data = body; item.state = "done";
@@ -252,7 +280,7 @@ async function mergeAll() {
   setStatus(`Merging ${parts.length} captures…`);
   try {
     const res = await fetch("/api/analyze/merge", {
-      method: "POST", headers: { "X-File-Sizes": parts.map(f => f.size).join(",") },
+      method: "POST", headers: { "X-File-Sizes": parts.map(f => f.size).join(","), ...keyHeaders() },
       body: new Blob(parts.map(f => f.file)),
     });
     const body = await res.json();
@@ -423,6 +451,7 @@ function toggleDetail(tr) {
   const next = tr.nextElementSibling;
   if (next && next.classList.contains("detail")) { next.remove(); return; }
   const f = data.flows.find(x => x.id == tr.dataset.id);
+  const srvCert = f.tls_certs.find(c => c.role === "server" && c.parsed);
   const find = (f.findings.length ? `<ul>${f.findings.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "<p>No problems detected.</p>")
     + (f.notes.length ? `<ul class="notes">${f.notes.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "");
   const pair = (a, b) => `${a ?? "–"} / ${b ?? "–"}`;
@@ -430,6 +459,8 @@ function toggleDetail(tr) {
   const yn = v => v == null ? "–" : v ? "yes" : "no";
   const stats = [
     ["Application", f.application ?? "–"], ["Detail (SNI / request)", f.app_detail ?? "–"], ["TLS version", f.tls_version ?? "–"], ["TLS ALPN", (f.tls_alpn || []).join(", ") || "–"],
+    ["TLS decryption", f.tls_decrypted ? "decrypted" : (f.tls_decryption || (f.tls13_encrypted ? "encrypted (TLS 1.3): load a key log" : "–"))],
+    ["Server certificate", srvCert ? `${srvCert.subject} · issuer ${srvCert.issuer} · valid until ${new Date(srvCert.not_after * 1000).toISOString().slice(0, 10)}${srvCert.self_signed ? " · self-signed" : ""}` : (f.tls_certs.length ? "present (not parsed)" : "–")],
     ["HTTP requests", f.http_requests], ["HTTP status codes", Object.entries(f.http_status).map(([c, n]) => `${c}×${n}`).join(", ") || "–"],
     ["IP version", "IPv" + f.ip_version], ["Max IP packet", f.max_ip_packet + " B"], ["Max TCP payload", f.max_payload + " B"],
     ["Avg frame", f.avg_frame_size + " B"], ["DF bit seen", yn(f.df_set)],

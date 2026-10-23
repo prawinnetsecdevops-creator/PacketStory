@@ -1,6 +1,6 @@
 @echo off
 rem Builds the portable package: dist\PacketStory\ and PacketStory-Portable.zip
-rem Needs: pip install pyinstaller   (end users need nothing, not even Python)
+rem Needs: pip install pyinstaller cryptography   (end users need nothing, not even Python)
 cd /d "%~dp0"
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist

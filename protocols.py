@@ -367,12 +367,18 @@ class DnsTracker:
         self.servers: dict[str, dict] = {}
         self.failures: list[dict] = []
         self.tcp_msgs = 0
+        self.dot_msgs = 0
 
-    def feed_tcp(self, ts: float, src: str, sport: int, dst: str, dport: int, msg: bytes) -> None:
-        """One complete DNS message reassembled from a TCP stream (length prefix already removed)."""
+    def feed_tcp(self, ts: float, src: str, sport: int, dst: str, dport: int, msg: bytes,
+                 transport: str = "tcp") -> None:
+        """One complete DNS message reassembled from a TCP (or TLS) stream, length prefix already removed."""
         before = self.queries + self.responses
-        self.feed(ts, SimpleNamespace(src=src, dst=dst), sport, dport, msg, "tcp")
-        self.tcp_msgs += (self.queries + self.responses) - before
+        self.feed(ts, SimpleNamespace(src=src, dst=dst), sport, dport, msg, transport)
+        n = (self.queries + self.responses) - before
+        if transport == "tcp":
+            self.tcp_msgs += n
+        else:
+            self.dot_msgs += n
 
     def feed(self, ts: float, dec, sport: int, dport: int, payload: bytes, transport: str = "udp") -> None:
         d = parse_dns(payload)
@@ -442,6 +448,7 @@ class DnsTracker:
                 f.append(f"DNS server {s['server']} never answered {s['queries']} queries.")
         return {"queries": self.queries, "responses": self.responses, "unanswered": unanswered,
                 "retries": self.retries, "truncated": self.truncated, "tcp_messages": self.tcp_msgs,
+                "dot_messages": self.dot_msgs,
                 "rcodes": self.rcodes,
                 "qtypes": self.qtypes, "latency_ms": lat, "servers": servers,
                 "top_queries": [{"name": n, "count": c} for n, c in

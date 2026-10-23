@@ -15,8 +15,9 @@ import re
 from collections import deque
 
 from protocols import (
-    HTTP_METHODS, parse_client_hello, parse_http_request, parse_http_status, parse_server_hello, tls_alert,
+    HTTP_METHODS, TLS_ALERTS, parse_client_hello, parse_http_request, parse_http_status, parse_server_hello, tls_alert,
 )
+from tlscrypt import MAX_CERT_MSG, TlsContext, describe_certificate, parse_certificates
 
 MASK = 0xFFFFFFFF
 MAX_OOO_BYTES = 64 * 1024
@@ -224,16 +225,20 @@ class HttpStream:
 
 
 class TlsStream:
-    """TLS records and handshake messages; stops at the first encrypted data."""
+    """TLS records and handshake messages; stops at the first encrypted data unless keys decrypt it."""
 
-    def __init__(self, server: bool) -> None:
+    def __init__(self, server: bool, ctx: TlsContext | None = None) -> None:
         self.server = server
+        self.ctx = ctx
         self.buf = bytearray()
         self.hs = bytearray()
         self.skip = 0
         self.hs_skip = 0
         self.hrr_pending = False  # after a HelloRetryRequest the real ServerHello still follows in plaintext
         self.finished = False
+        self.encrypted = False  # TLS 1.2: records after ChangeCipherSpec
+        self.inner = None  # parser for decrypted application data (False once given up)
+        self.announced = False
 
     def feed(self, data: bytes) -> list[tuple]:
         out = []
@@ -251,15 +256,22 @@ class TlsStream:
             if typ not in (20, 21, 22, 23) or major != 3 or ln > MAX_TLS_RECORD:
                 self.finished = True
                 break
-            if typ == 23:  # application data: encrypted from here on
-                self.finished = True
+            sealed = typ == 23 or (self.encrypted and typ in (21, 22))
+            if sealed and not (self.ctx and self.ctx.can_decrypt(self.server)):
+                self.finished = True  # encrypted and no usable keys
                 break
             if len(self.buf) < 5 + ln:
                 break
             record = bytes(self.buf[:5 + ln])
             del self.buf[:5 + ln]
-            if typ == 20:  # ChangeCipherSpec: everything after is encrypted (unless a HelloRetryRequest is pending)
-                if not self.hrr_pending:
+            if sealed:
+                self._sealed(typ, record, out)
+            elif typ == 20:  # ChangeCipherSpec
+                if self.ctx and self.ctx.mode == "13" and self.ctx.keylog:
+                    continue  # TLS 1.3 compatibility CCS: carries nothing
+                if self.ctx and self.ctx.mode == "12" and self.ctx.keylog and not self.hrr_pending:
+                    self.encrypted = True  # TLS 1.2: next records are encrypted
+                elif not self.hrr_pending:
                     self.finished = True
             elif typ == 21:
                 alert = tls_alert(record)
@@ -269,6 +281,40 @@ class TlsStream:
                 self.hs += record[5:]
                 self._handshake(out)
         return out
+
+    def _sealed(self, typ: int, record: bytes, out: list) -> None:
+        res = self.ctx.decrypt(self.server, typ, record[:5], record[5:])
+        if res is None:
+            if self.ctx.failed:
+                self.finished = True
+                out.append(("tls_decrypt_failed", self.ctx.status))
+            return
+        if not self.announced:
+            self.announced = True
+            out.append(("tls_decrypted", True))
+        ctype, plain = res
+        if ctype == 22:
+            self.hs += plain
+            self._handshake(out)
+        elif ctype == 21 and len(plain) >= 2:
+            out.append(("tls_alert", (plain[0], TLS_ALERTS.get(plain[1], f"alert {plain[1]}"))))
+        elif ctype == 23:
+            self._app(plain, out)
+
+    def _app(self, plain: bytes, out: list) -> None:
+        if self.inner is None:
+            if self.ctx.dot:
+                self.inner = DnsStream()
+            else:
+                kind = sniff(plain)
+                self.inner = HttpStream(kind == "http_req", self.ctx.methods) if kind in ("http_req", "http_resp") \
+                    else False
+        if not self.inner:
+            return
+        names = {"dns": "dot_dns", "http_req": "https_req", "http_resp": "https_resp"}
+        out += [(names[k], v) for k, v in self.inner.feed(plain) if k in names]
+        if self.inner.finished:
+            self.inner = False
 
     def _handshake(self, out: list) -> None:
         want = 2 if self.server else 1
@@ -282,8 +328,14 @@ class TlsStream:
             if len(self.hs) < 4:
                 return
             mt, ml = self.hs[0], int.from_bytes(self.hs[1:4], "big")
+            if mt == 11 and 0 < ml <= MAX_CERT_MSG and self.ctx and self.ctx.mode:
+                if len(self.hs) < 4 + ml:
+                    return
+                self._certificate(bytes(self.hs[4:4 + ml]), out)
+                del self.hs[:4 + ml]
+                continue
             if mt != want:
-                del self.hs[:4]  # certificates, key exchange, Finished...: skip without buffering
+                del self.hs[:4]  # key exchange, Finished...: skip without buffering
                 self.hs_skip = ml
                 continue
             if ml > MAX_HELLO:
@@ -295,6 +347,12 @@ class TlsStream:
             del self.hs[:4 + ml]
             self._hello(msg, out)
 
+    def _certificate(self, body: bytes, out: list) -> None:
+        certs = parse_certificates(body, self.ctx.mode == "13")
+        info = describe_certificate(certs[0]) if certs else None
+        out.append(("tls_cert", {"role": "server" if self.server else "client", "chain": len(certs),
+                                 "parsed": info is not None, **(info or {})}))
+
     def _hello(self, msg: bytes, out: list) -> None:
         # the parsers expect a 5-byte record header before the handshake message
         h = b"\x16\x03\x01" + min(len(msg), 65535).to_bytes(2, "big") + msg
@@ -302,10 +360,16 @@ class TlsStream:
             r = parse_server_hello(h)
             if r:
                 self.hrr_pending = bool(r[1])
+                if self.ctx and not r[1] and len(msg) >= 44:
+                    i = 38 + 1 + msg[38]
+                    if len(msg) >= i + 2:
+                        self.ctx.set_server_hello(msg[6:38], int.from_bytes(msg[i:i + 2], "big"), r[0] == "TLS 1.3")
                 out.append(("tls_server_hello", r))
         else:
             r = parse_client_hello(h)
             if r:
+                if self.ctx and len(msg) >= 38:
+                    self.ctx.set_client_hello(msg[6:38])
                 out.append(("tls_client_hello", r))
 
     def flush_partial(self) -> list[tuple]:
@@ -359,9 +423,11 @@ def _could_become_known(b: bytes) -> bool:
 class AppStream:
     """One TCP direction: reassemble, detect the protocol, and emit (kind, value) events."""
 
-    def __init__(self, server_side: bool, dns: bool = False, methods: deque | None = None) -> None:
+    def __init__(self, server_side: bool, dns: bool = False, methods: deque | None = None,
+                 tls: TlsContext | None = None) -> None:
         self.server_side = server_side  # True when this direction is server -> client
         self.methods = methods
+        self.tls = tls
         self.re = Reassembler()
         self.parser = DnsStream() if dns else None
         self.pre = bytearray()
@@ -385,7 +451,7 @@ class AppStream:
         if kind == "http_resp":
             return HttpStream(False, self.methods)
         if kind == "tls":
-            return TlsStream(self.server_side)
+            return TlsStream(self.server_side, self.tls)
         return SshStream()
 
     def _deliver(self, chunk: bytes) -> list[tuple]:
