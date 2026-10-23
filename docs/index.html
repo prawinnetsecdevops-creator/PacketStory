@@ -33,6 +33,7 @@
   .sample .txt { padding:10px 14px; } .sample .txt p { margin:2px 0; font-size:14px; color:var(--mute); }
   .sample .txt b { font-size:15px; } .sample .act { color:var(--ok) !important; }
   .c { background:#7f1d1d; color:#fecaca; } .h { background:#7c2d12; color:#fed7aa; } .m { background:#713f12; color:#fde68a; }
+  .shot { width:100%; height:auto; border-radius:12px; border:1px solid var(--line); box-shadow:0 12px 40px rgba(0,0,0,.45); }
   footer { border-top:1px solid var(--line); margin-top:60px; padding:26px 0 40px; color:var(--mute); font-size:14px; text-align:center; }
   footer a { color:var(--accent); }
 </style>
@@ -40,7 +41,7 @@
 <body>
 <div class="wrap">
   <nav><b>PacketStory</b>
-    <span><a href="#features">Features</a><a href="#start">Get started</a>
+    <span><a href="#about">About</a><a href="#features">Features</a><a href="#roadmap">Road map</a><a href="#start">Get started</a>
     <a href="https://github.com/prawinnetsecdevops-creator/PacketStory">GitHub</a></span></nav>
 
   <section class="hero">
@@ -52,8 +53,34 @@
     <div class="small">Portable zip &middot; no install, no Python needed &middot; Windows 10/11</div>
   </section>
 
+  <section id="about">
+    <h2>What is PacketStory?</h2>
+    <p>When a website is slow, a call drops or an app can't connect, the evidence is usually sitting in a
+       <b>packet capture</b> &mdash; a recording of everything that crossed the network. The trouble is that a capture is
+       thousands of lines of low-level data, and reading it takes years of experience.</p>
+    <p><b>PacketStory reads the capture for you and tells you the story in plain English:</b> what went wrong,
+       the most likely reason, and what to try next. No networking degree required.</p>
+  </section>
+
+  <section id="idea">
+    <h2>The idea</h2>
+    <div class="grid">
+      <div class="card"><h3>1. Drop in a capture</h3><p>Drag in a <code>.pcap</code> or <code>.pcapng</code> file from Wireshark, tcpdump or a firewall. Several files at once are fine.</p></div>
+      <div class="card"><h3>2. Get the story</h3><p>A health score from 0 to 100 and a short list of problems, worst first, each explained in everyday words.</p></div>
+      <div class="card"><h3>3. Know what to do</h3><p>Every problem comes with a suggested next step and the exact connections involved, so you can go straight to the fix.</p></div>
+    </div>
+    <p class="small">Everything runs on your own computer. Your captures never leave it.</p>
+  </section>
+
+  <section id="screenshot">
+    <h2>See it in action</h2>
+    <p>This is PacketStory after analysing a sample capture: the score and ranked problems at the top,
+       then traffic statistics, protocols, DNS and every connection below.</p>
+    <img class="shot" src="screenshot.png" alt="PacketStory showing a health score of 49 out of 100, six ranked issues with recommended actions, traffic statistics and protocol charts">
+  </section>
+
   <section>
-    <h2>What you get</h2>
+    <h2>Example findings</h2>
     <div class="sample"><div class="cat m" style="background:#7f1d1d;color:#fecaca">MTU</div><div class="txt">
       <b>🔴 Possible PMTU black hole in 1 flow(s)</b><p>Only full-size DF segments are being retransmitted while small packets pass.</p>
       <p class="act">▶ Allow ICMP "fragmentation needed", or clamp MSS / lower the interface MTU on the tunnel or VPN.</p></div></div>
@@ -84,6 +111,17 @@
     </ol>
     <div class="small">Windows SmartScreen may warn because the app is not code-signed yet: choose <b>More info &rarr; Run anyway</b>.
     Prefer source? It is pure Python with no required dependencies: <code>python app.py</code>.</div>
+  </section>
+
+  <section id="roadmap">
+    <h2>Road map</h2>
+    <div class="grid">
+      <div class="card"><h3>&#9989; Done</h3><p>Ranked reports, TCP / UDP / DNS / DHCP / ICMP / ARP analysis, TLS insight with optional decryption, DNS-over-TLS, multi-file merge, Windows portable app.</p></div>
+      <div class="card"><h3>&#128679; Next</h3><p>Shareable HTML / PDF reports, a side-by-side "before and after" comparison view, and clearer visual timelines of a connection.</p></div>
+      <div class="card"><h3>&#128301; Ideas</h3><p>QUIC / HTTP/3 and HTTP/2 insight, voice and video call quality (RTP), Linux and macOS builds, a code-signed installer.</p></div>
+    </div>
+    <p class="small">Have an idea or found a capture that PacketStory explains badly?
+      <a style="color:var(--accent)" href="https://github.com/prawinnetsecdevops-creator/PacketStory/issues">Open an issue</a>.</p>
   </section>
 
   <footer>PacketStory is free software under the MIT License &middot;

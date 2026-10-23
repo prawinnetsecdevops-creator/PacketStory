@@ -8,6 +8,18 @@ broken, why it probably is, and what to do next. It runs entirely on your machin
 **[Download for Windows](https://github.com/prawinnetsecdevops-creator/PacketStory/releases/latest/download/PacketStory-Portable.zip)**
 &middot; [Project page](https://prawinnetsecdevops-creator.github.io/PacketStory/)
 
+## What is it?
+
+When a website is slow, a call drops or an app can't connect, the evidence is usually in a **packet capture**,
+a recording of everything that crossed the network. Reading one normally takes years of experience.
+PacketStory reads it for you and explains, in plain English, what went wrong, the likely reason and what to try next.
+
+1. **Drop in a capture** (`.pcap` / `.pcapng`, one or many files).
+2. **Get the story:** a 0-100 health score and a short list of problems, worst first.
+3. **Know what to do:** every problem comes with a suggested next step and the connections involved.
+
+![PacketStory analysing a sample capture](docs/screenshot.png)
+
 ## Quick start (Windows, no install)
 
 1. Download `PacketStory-Portable.zip` from the [latest release](https://github.com/prawinnetsecdevops-creator/PacketStory/releases/latest).
@@ -61,6 +73,14 @@ build_exe.bat        # produces PacketStory-Portable.zip
 
 Pushing a tag such as `v2.0.0` builds the zip on GitHub and attaches it to a release automatically
 (see `.github/workflows/release.yml`).
+
+## Road map
+
+- **Done:** ranked reports, TCP/UDP/DNS/DHCP/ICMP/ARP analysis, TLS insight with optional decryption, DNS-over-TLS, multi-file merge, Windows portable app.
+- **Next:** shareable HTML/PDF reports, a side-by-side comparison view, clearer visual connection timelines.
+- **Ideas:** QUIC/HTTP/3 and HTTP/2 insight, voice/video quality (RTP), Linux and macOS builds, a code-signed installer.
+
+Ideas and bug reports are welcome in [Issues](https://github.com/prawinnetsecdevops-creator/PacketStory/issues).
 
 ## Limitations
 
