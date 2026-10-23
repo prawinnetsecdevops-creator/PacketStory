@@ -366,6 +366,33 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(count(a, pcap([(0.0, syn), (0.0004, syn), (0.0008, syn)])), 3)
         self.assertEqual(count(a, pcap([(5.0, syn)])), 3)           # outside window: distinct
 
+    def test_malformed_pcapng_is_rejected(self):
+        good = pcapng([(0, tcp_pkt("10.0.0.1", "10.0.0.2", 5000, 80, 1, 0, 2))])
+        shb_len = struct.unpack("<I", good[4:8])[0]
+        self.assertGreater(len(run(good)["flows"]), 0)
+        bad = {
+            "truncated section header": good[:20],
+            "section trailer mismatch": good[:shb_len - 4] + struct.pack("<I", 99) + good[shb_len:],
+            "block trailer mismatch": good[:-4] + struct.pack("<I", 12),
+            "truncated block": good[:-6],
+        }
+        # captured length larger than the block body
+        epb = good.rfind(struct.pack("<I", 6))
+        cap_off = epb + 8 + 12
+        bad["cap exceeds block"] = good[:cap_off] + struct.pack("<I", 5000) + good[cap_off + 4:]
+        bad["cap exceeds orig"] = (good[:cap_off] + struct.pack("<I", 70) + struct.pack("<I", 60)
+                                   + good[cap_off + 8:])
+        for name, raw in bad.items():
+            with self.subTest(name), self.assertRaises(t.CaptureError):
+                run(raw)
+
+    def test_no_decodable_packets_is_not_healthy(self):
+        for raw in (pcap([]), pcap([(0, b"\x00" * 20)]), pcapng([(0, b"\x00" * 20)])):
+            r = run(raw)
+            self.assertEqual(r["summary"]["health"], "no data")
+            self.assertIsNone(r["summary"]["score"])
+            self.assertEqual(r["analyzable_packets"], 0)
+
     def test_summary_ranks_refused_connection(self):
         r = run(pcap([(0, tcp_pkt("10.0.0.1", "10.0.0.2", 40000, 31337, 1, 0, 2)),
                       (0.001, tcp_pkt("10.0.0.2", "10.0.0.1", 31337, 40000, 0, 2, 0x14))]))

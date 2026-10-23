@@ -58,6 +58,8 @@ def _read_pcap(stream: BinaryIO, magic: bytes):
         if len(h) < 16:
             raise CaptureError("Truncated packet header.")
         sec, frac, incl, orig = rec.unpack(h)
+        if incl > MAX_BLOCK:
+            raise CaptureError("Invalid packet length in PCAP record.")
         data = stream.read(incl)
         if len(data) < incl:
             raise CaptureError("Truncated packet data.")
@@ -102,9 +104,13 @@ def _read_pcapng(stream: BinaryIO, first4: bytes):
             else:
                 raise CaptureError("Invalid pcapng section header.")
             length = struct.unpack(order + "I", raw_len)[0]
-            if length < 12 or length > MAX_BLOCK:
+            if length < 28 or length > MAX_BLOCK or length % 4:
                 raise CaptureError("Invalid pcapng section header length.")
-            stream.read(length - 12)
+            rest = stream.read(length - 12)
+            if len(rest) < length - 12:
+                raise CaptureError("Truncated pcapng section header.")
+            if struct.unpack(order + "I", rest[-4:])[0] != length:
+                raise CaptureError("Inconsistent pcapng section header length.")
             ifaces = []
             btype_raw = None
             continue
@@ -115,22 +121,41 @@ def _read_pcapng(stream: BinaryIO, first4: bytes):
         body = stream.read(length - 8)
         if len(body) < length - 8:
             raise CaptureError("Truncated pcapng block.")
+        if struct.unpack(order + "I", body[-4:])[0] != length:
+            raise CaptureError("Inconsistent pcapng block length.")
         body = body[:-4]
         btype_raw = None
-        if btype == 1 and len(body) >= 8:
+        if btype == 1:
+            if len(body) < 8:
+                raise CaptureError("Truncated pcapng interface block.")
             link = struct.unpack(order + "H", body[0:2])[0]
-            ifaces.append((link, _tsresol(order, body[8:])))
-        elif btype == 6 and len(body) >= 20:
+            snaplen = struct.unpack(order + "I", body[4:8])[0]
+            ifaces.append((link, _tsresol(order, body[8:]), snaplen))
+        elif btype == 6:
+            if len(body) < 20:
+                raise CaptureError("Truncated pcapng packet block.")
             iface, hi, lo, cap, orig = struct.unpack(order + "IIIII", body[:20])
             if iface >= len(ifaces):
                 raise CaptureError("pcapng packet references an unknown interface.")
-            link, units = ifaces[iface]
+            if cap > len(body) - 20:
+                raise CaptureError("pcapng packet block is shorter than its captured length.")
+            if cap > orig:
+                raise CaptureError("pcapng packet captured length exceeds its original length.")
+            link, units, _ = ifaces[iface]
             number += 1
             yield number, ((hi << 32) | lo) / units, body[20:20 + cap], link, orig
-        elif btype == 3 and len(body) >= 4 and ifaces:
+        elif btype == 3:
+            if len(body) < 4:
+                raise CaptureError("Truncated pcapng simple packet block.")
+            if not ifaces:
+                raise CaptureError("pcapng packet appears before any interface description.")
             orig = struct.unpack(order + "I", body[:4])[0]
+            link, _, snaplen = ifaces[0]
+            cap = min(orig, snaplen) if snaplen else orig
+            if cap > len(body) - 4:
+                raise CaptureError("pcapng simple packet block is shorter than its packet length.")
             number += 1
-            yield number, 0.0, body[4:4 + orig], ifaces[0][0], orig
+            yield number, 0.0, body[4:4 + cap], link, orig
 
 
 # ---------------------------------------------------------------- names

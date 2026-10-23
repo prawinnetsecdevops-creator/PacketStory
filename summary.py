@@ -164,6 +164,12 @@ def _extras_issues(r: dict) -> list[dict]:
 
 
 def build_summary(result: dict) -> dict:
+    if not result.get("analyzable_packets"):
+        total = result.get("total_packets", 0)
+        headline = ("The capture contains no packets, so nothing could be assessed." if not total else
+                    f"None of the {total} packet(s) could be decoded as IP, TCP, UDP or ARP, so nothing could be assessed.")
+        return {"health": "no data", "score": None, "headline": headline,
+                "counts": {s: 0 for s in SEVERITY_ORDER}, "issues": []}
     issues = _tcp_issues(result) + _mtu_issues(result) + _extras_issues(result)
     issues.sort(key=lambda i: SEVERITY_ORDER[i["severity"]])
     score = max(0, 100 - sum(WEIGHTS[i["severity"]] for i in issues))

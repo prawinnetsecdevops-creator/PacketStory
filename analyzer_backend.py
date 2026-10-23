@@ -689,7 +689,7 @@ def analyze_capture(stream: BinaryIO) -> dict:
 def analyze_packets(packets, sources: int = 1) -> dict:
     current: dict[frozenset, Flow] = {}  # 4-tuple -> its latest connection
     all_flows: list[Flow] = []
-    total = tcp_count = truncated = 0
+    total = tcp_count = truncated = analyzable = 0
     first = last = None
     rows: list[dict] = []
     sizes = [0] * len(SIZE_BINS)
@@ -725,6 +725,7 @@ def analyze_packets(packets, sources: int = 1) -> dict:
             if dec is None:
                 extras.count("Other / non-IP", flen)
                 continue
+            analyzable += 1
             extras.feed(ts, flen, dec)
             if dec.kind == "ip":
                 talk(dec.src, dec.dst, flen)
@@ -734,6 +735,7 @@ def analyze_packets(packets, sources: int = 1) -> dict:
                         icmp_ptb.append(ptb)
             continue
         tcp_count += 1
+        analyzable += 1
         tcp_bytes += p.payload_len
         extras.count("TCP", flen, service_for(p.sport, p.dport) or "Other TCP")
         talk(p.src, p.dst, flen)
@@ -776,6 +778,7 @@ def analyze_packets(packets, sources: int = 1) -> dict:
                      f"path MTU is {min(m['next_hop_mtu'] for m in icmp_ptb)} on at least one path.")
     result = {
         "total_packets": total,
+        "analyzable_packets": analyzable,
         "tcp_packets": tcp_count,
         "duration": duration,
         "flow_count": len(summaries),

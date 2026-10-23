@@ -262,7 +262,7 @@ function renderSummary() {
   const issues = s.issues.map(i => `<div class="issue ${i.severity}"><div class="cat">${esc(i.category)}</div><div class="txt"><b>${SEV[i.severity]} ${esc(i.title)}<small>${i.severity}</small></b>
     ${i.detail ? `<p>${esc(i.detail)}</p>` : ""}<p class="act">▶ ${esc(i.action)}</p>
     ${i.flows.length ? `<p class="mute">TCP flows: ${i.flows.map(x => "#" + x).join(", ")}</p>` : ""}</div></div>`).join("");
-  $("summary").innerHTML = `<div class="sum"><div class="top"><span class="score">${s.score}<small style="font-size:14px;color:var(--mute)">/100</small></span>
+  $("summary").innerHTML = `<div class="sum"><div class="top"><span class="score">${s.score === null ? "N/A" : s.score}<small style="font-size:14px;color:var(--mute)">${s.score === null ? "" : "/100"}</small></span>
     <span>${esc(s.headline)}</span></div>${issues}</div>`;
 }
 
@@ -294,7 +294,7 @@ function renderCompare() {
   const rows = done.map(({ f, i }) => {
     const d = f.data;
     const dnsBad = d.dns.unanswered + Object.entries(d.dns.rcodes).filter(([k]) => k !== "NOERROR").reduce((a, [, v]) => a + v, 0);
-    return `<tr class="flow" data-i="${i}"><td>${esc(f.name)}</td><td>${d.summary.score}</td><td>${esc(d.summary.health)}</td><td>${hb(f.size)}</td><td>${d.total_packets}</td>
+    return `<tr class="flow" data-i="${i}"><td>${esc(f.name)}</td><td>${d.summary.score === null ? "N/A" : d.summary.score}</td><td>${esc(d.summary.health)}</td><td>${hb(f.size)}</td><td>${d.total_packets}</td>
       <td>${d.duration.toFixed(2)}</td><td>${d.flow_count}</td><td>${d.problem_flows.length}</td>
       <td>${d.overview.total_retransmissions}</td><td>${d.udp.count}</td><td>${dnsBad}</td>
       <td>${d.icmp.errors.length}</td><td>${d.alerts.length}</td></tr>`;
