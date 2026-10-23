@@ -123,6 +123,36 @@ class BackendTests(unittest.TestCase):
         self.assertAlmostEqual(d["latency_ms"]["avg"], 50, delta=1)
         self.assertEqual(r["udp"]["count"], 2)
 
+    def test_dns_matching_uses_resolver_and_question(self):
+        c = "10.0.0.1"
+        # same client port and ID, two different resolvers: two outstanding queries, not a retry
+        r = run(pcap([
+            (0.0, udp_pkt(c, "8.8.8.8", 5555, 53, dns_msg(7, "a.test"))),
+            (0.01, udp_pkt(c, "1.1.1.1", 5555, 53, dns_msg(7, "a.test"))),
+            (0.05, udp_pkt("8.8.8.8", c, 53, 5555, dns_msg(7, "a.test", 1))),
+        ]))["dns"]
+        self.assertEqual((r["queries"], r["responses"], r["unanswered"], r["retries"]), (2, 1, 1, 0))
+        # same resolver/port/ID but a different question: not a retry, and a mismatched answer does not clear it
+        r = run(pcap([
+            (0.0, udp_pkt(c, "8.8.8.8", 5555, 53, dns_msg(7, "a.test"))),
+            (0.01, udp_pkt(c, "8.8.8.8", 5555, 53, dns_msg(7, "b.test"))),
+            (0.05, udp_pkt("8.8.8.8", c, 53, 5555, dns_msg(7, "b.test", 1))),
+        ]))["dns"]
+        self.assertEqual((r["retries"], r["unanswered"]), (0, 1))
+        # a true retry (identical query) is still a retry
+        r = run(pcap([
+            (0.0, udp_pkt(c, "8.8.8.8", 5555, 53, dns_msg(7, "a.test"))),
+            (1.0, udp_pkt(c, "8.8.8.8", 5555, 53, dns_msg(7, "a.test"))),
+            (1.05, udp_pkt("8.8.8.8", c, 53, 5555, dns_msg(7, "a.test", 1))),
+        ]))["dns"]
+        self.assertEqual((r["retries"], r["unanswered"]), (1, 0))
+        # a response from a resolver that was never queried does not match
+        r = run(pcap([
+            (0.0, udp_pkt(c, "8.8.8.8", 5555, 53, dns_msg(7, "a.test"))),
+            (0.05, udp_pkt("9.9.9.9", c, 53, 5555, dns_msg(7, "a.test", 1))),
+        ]))["dns"]
+        self.assertEqual(r["unanswered"], 1)
+
     def test_udp_one_way(self):
         r = run(pcap([(i, udp_pkt("10.0.0.1", "10.0.0.9", 6000, 9999, b"hi")) for i in range(3)]))
         self.assertTrue(r["udp"]["flows"][0]["findings"])

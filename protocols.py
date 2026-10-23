@@ -314,7 +314,8 @@ def parse_dns(p: bytes) -> dict | None:
         return None
     name, off = r
     return {"id": ident, "qr": flags >> 15, "tc": (flags >> 9) & 1, "rcode": flags & 0xF,
-            "name": name, "qtype": struct.unpack(">H", p[off:off + 2])[0], "answers": an}
+            "name": name, "qtype": struct.unpack(">H", p[off:off + 2])[0],
+            "qclass": struct.unpack(">H", p[off + 2:off + 4])[0], "answers": an}
 
 
 def _pct(vals: list[float], q: float) -> float:
@@ -346,16 +347,17 @@ class DnsTracker:
         if len(payload) < 14 or struct.unpack(">H", payload[:2])[0] < 12:
             return
         before = self.queries + self.responses
-        self.feed(ts, SimpleNamespace(src=src, dst=dst), sport, dport, payload[2:])
+        self.feed(ts, SimpleNamespace(src=src, dst=dst), sport, dport, payload[2:], "tcp")
         self.tcp_msgs += (self.queries + self.responses) - before
 
-    def feed(self, ts: float, dec, sport: int, dport: int, payload: bytes) -> None:
+    def feed(self, ts: float, dec, sport: int, dport: int, payload: bytes, transport: str = "udp") -> None:
         d = parse_dns(payload)
         if not d:
             return
+        question = (d["name"].lower(), d["qtype"], d["qclass"])
         if d["qr"] == 0 and dport == 53:
             self.queries += 1
-            key = (dec.src, sport, d["id"])
+            key = (transport, dec.src, sport, dec.dst, dport, d["id"]) + question
             if key in self.pending:
                 self.retries += 1
             elif len(self.pending) < 50_000:
@@ -372,7 +374,7 @@ class DnsTracker:
                 self.truncated += 1
             srv = self.servers.setdefault(dec.src, {"q": 0, "r": 0, "lat": []})
             srv["r"] += 1
-            sent = self.pending.pop((dec.dst, dport, d["id"]), None)
+            sent = self.pending.pop((transport, dec.dst, dport, dec.src, sport, d["id"]) + question, None)
             if sent:
                 ms = (ts - sent[0]) * 1000
                 self.lat.append(ms)
