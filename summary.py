@@ -62,7 +62,7 @@ def _tcp_issues(r: dict) -> list[dict]:
     blackhole = ids(lambda f: has(f, "PMTU black hole"))
     if blackhole:
         out.append(_issue("critical", "MTU", f"Possible PMTU black hole in {len(blackhole)} flow(s)",
-                          "Only full-size DF segments are being retransmitted while small packets pass.",
+                          "Full-size DF segments were retransmitted and never acknowledged while smaller segments were delivered.",
                           "Allow ICMP 'fragmentation needed', or clamp MSS / lower the interface MTU on the tunnel or VPN.",
                           blackhole))
     zero = ids(lambda f: f["zero_windows"])

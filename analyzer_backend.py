@@ -268,6 +268,9 @@ class Flow:
     max_gap_at: float = 0.0
     rtt_samples: list = field(default_factory=list)
     _pending: dict = field(default_factory=dict)
+    _bh_first: dict = field(default_factory=dict)
+    _bh_unacked: dict = field(default_factory=dict)
+    small_ok: int = 0
     first_data_c2s: float | None = None
     first_data_s2c: float | None = None
     ptb_mtu: int | None = None
@@ -358,7 +361,14 @@ class Flow:
         if p.flags & ACK:
             sent = self._pending.get(not c2s)
             if sent and p.ack in sent:
-                self.rtt_samples.append((p.time - sent.pop(p.ack)) * 1000)
+                t0, size = sent.pop(p.ack)
+                self.rtt_samples.append((p.time - t0) * 1000)
+                if size <= 0.5 * self.max_payload:
+                    self.small_ok += 1  # a small data segment was delivered and acknowledged
+            stuck = self._bh_unacked.get(not c2s)
+            if stuck:
+                for end in [e for e in stuck if ((p.ack - e) & 0xFFFFFFFF) < 0x7FFFFFFF]:
+                    del stuck[end]  # the peer eventually acknowledged this large segment
 
     def _classify_segment(self, c2s: bool, seq: int, span: int, t: float) -> tuple[str, int]:
         """Return ("new" | "reorder" | "retrans", end_seq) for a segment and record its byte range.
@@ -433,13 +443,17 @@ class Flow:
                 self.retransmissions += 1
                 if p.payload_len:
                     self.retrans_payloads.append((p.payload_len, p.df))
+                    if p.df and p.payload_len >= max(1000, 0.8 * self.max_payload):
+                        self._bh_first.setdefault(c2s, p.time)
+                        stuck = self._bh_unacked.setdefault(c2s, {})
+                        stuck[end] = stuck.get(end, 0) + 1
                 self._pending.get(c2s, {}).pop(end, None)
             elif kind == "reorder":
                 self.reordered += 1
             elif p.payload_len:
                 pend = self._pending.setdefault(c2s, {})
                 if len(pend) < 2000:
-                    pend[end] = p.time
+                    pend[end] = (p.time, p.payload_len)
         elif p.flags & ACK and not p.flags & (SYN | FIN | RST):
             key = (c2s, p.ack)
             if self._last_ack.get(c2s) == key and p.window != 0:
@@ -479,10 +493,17 @@ class Flow:
             out.append(f"{self.zero_windows} zero-window packet(s): receiver is overloaded.")
         if self.ptb_mtu:
             out.append(f"ICMP 'fragmentation needed / packet too big' received: path MTU is {self.ptb_mtu}.")
-        big = [s for s, df in self.retrans_payloads if df]
-        if len(big) >= 2 and self.max_payload and min(big) >= max(1000, 0.8 * self.max_payload):
-            out.append("Only full-size DF segments are retransmitted: possible PMTU black hole "
-                       "(ICMP blocked). Try lowering MTU / clamping MSS.")
+        stuck = sum(n for d in self._bh_unacked.values() for n in d.values())
+        # small packets passing: the handshake completed, or small data segments were acknowledged
+        small_ok = self.small_ok or (self.syn_time is not None and self.ack_time is not None)
+        if stuck >= 2 and small_ok:
+            out.append("Possible PMTU black hole: full-size DF segments were retransmitted and never acknowledged, "
+                       "while smaller packets (handshake / small segments) got through. "
+                       "Try lowering MTU / clamping MSS.")
+        elif stuck >= 2:
+            out.append("Full-size DF segments were retransmitted without acknowledgement, but no smaller traffic "
+                       "succeeded to confirm a size problem: more likely ordinary loss or a stalled peer "
+                       "(PMTU issue is possible, low confidence).")
         if self.retransmissions and self.sack_perm and not all(self.sack_perm.get(k) for k in (True, False)):
             out.append("SACK not negotiated by both sides: loss recovery will be slower.")
         for c2s, name, peer_bytes in ((False, "server", self.bytes_c2s), (True, "client", self.bytes_s2c)):

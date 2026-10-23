@@ -251,6 +251,25 @@ class V2Tests(unittest.TestCase):
         r = run(pcap([seg(0.0, 0xFFFFFFC0), seg(0.001, 0x24), seg(0.002, 0x88)]))
         self.assertEqual(r["flows"][0]["retransmissions"], 0)
 
+    def test_pmtu_requires_evidence_of_small_packets_passing(self):
+        c, s = "10.0.0.1", "10.0.0.2"
+        big = lambda t: (t, tcp_pkt(c, s, 40000, 80, 101, 501, 0x10, payload=b"x" * 1400))
+        # large segment repeated, but no handshake and no small traffic: not a black hole
+        f = run(pcap([big(0.0), big(1.0), big(3.0)]))["flows"][0]
+        self.assertFalse(any("black hole: " in x for x in f["findings"]))
+        self.assertTrue(any("low confidence" in x for x in f["findings"]))
+        # same, but the handshake completed first: black hole is reported
+        hs = [(0.0, tcp_pkt(c, s, 40000, 80, 100, 0, 2)),
+              (0.01, tcp_pkt(s, c, 80, 40000, 500, 101, 0x12)),
+              (0.02, tcp_pkt(c, s, 40000, 80, 101, 501, 0x10))]
+        r = run(pcap(hs + [big(0.03), big(1.0), big(3.0)]))
+        self.assertTrue(any("black hole: " in x for x in r["flows"][0]["findings"]))
+        self.assertEqual(r["summary"]["issues"][0]["severity"], "critical")
+        # large segment eventually acknowledged: no black hole
+        ok = run(pcap(hs + [big(0.03), big(1.0), big(3.0),
+                            (3.1, tcp_pkt(s, c, 80, 40000, 501, 1501, 0x10))]))["flows"][0]
+        self.assertFalse(any("PMTU" in x for x in ok["findings"]))
+
     def test_summary_healthy_when_clean(self):
         r = run(pcap([(0, tcp_pkt("10.0.0.1", "10.0.0.2", 5000, 80, 100, 0, 2)),
                       (0.01, tcp_pkt("10.0.0.2", "10.0.0.1", 80, 5000, 500, 101, 0x12)),
