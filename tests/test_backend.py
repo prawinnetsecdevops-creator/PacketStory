@@ -228,6 +228,29 @@ class V2Tests(unittest.TestCase):
         self.assertIn("refused", s["issues"][0]["title"])
         self.assertLess(s["score"], 100)
 
+    def test_reordering_is_not_retransmission(self):
+        c, s = "10.0.0.1", "10.0.0.2"
+        seg = lambda t, seq: (t, tcp_pkt(c, s, 40000, 80, seq, 1, 0x10, payload=b"x" * 100))
+        r = run(pcap([seg(0.000, 100), seg(0.001, 300), seg(0.002, 200)]))
+        f = r["flows"][0]
+        self.assertEqual((f["retransmissions"], f["reordered"]), (0, 1))
+
+    def test_late_hole_fill_duplicate_and_overlap_are_retransmissions(self):
+        c, s = "10.0.0.1", "10.0.0.2"
+        seg = lambda t, seq, n=100: (t, tcp_pkt(c, s, 40000, 80, seq, 1, 0x10, payload=b"x" * n))
+        late = run(pcap([seg(0.0, 100), seg(0.001, 300), seg(1.0, 200)]))["flows"][0]
+        self.assertEqual((late["retransmissions"], late["reordered"]), (1, 0))
+        dup = run(pcap([seg(0.0, 100), seg(0.001, 200), seg(0.002, 100)]))["flows"][0]
+        self.assertEqual((dup["retransmissions"], dup["reordered"]), (1, 0))
+        part = run(pcap([seg(0.0, 100), seg(0.001, 150, 100)]))["flows"][0]
+        self.assertEqual(part["retransmissions"], 1)
+
+    def test_sequence_wraparound_is_not_retransmission(self):
+        c, s = "10.0.0.1", "10.0.0.2"
+        seg = lambda t, seq: (t, tcp_pkt(c, s, 40000, 80, seq, 1, 0x10, payload=b"x" * 100))
+        r = run(pcap([seg(0.0, 0xFFFFFFC0), seg(0.001, 0x24), seg(0.002, 0x88)]))
+        self.assertEqual(r["flows"][0]["retransmissions"], 0)
+
     def test_summary_healthy_when_clean(self):
         r = run(pcap([(0, tcp_pkt("10.0.0.1", "10.0.0.2", 5000, 80, 100, 0, 2)),
                       (0.01, tcp_pkt("10.0.0.2", "10.0.0.1", 80, 5000, 500, 101, 0x12)),

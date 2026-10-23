@@ -435,7 +435,7 @@ function toggleDetail(tr) {
     ["TTL (c / s)", `${ttl(f.ttl_client)} / ${ttl(f.ttl_server)}`], ["Est. hops (c / s)", pair(f.hops_client, f.hops_server)],
     ["RTT min / avg / max (ms)", `${fmt(f.rtt_min_ms)} / ${fmt(f.rtt_avg_ms)} / ${fmt(f.rtt_max_ms)}`],
     ["Handshake RTT (ms)", fmt(f.handshake_rtt_ms)], ["Server response (ms)", fmt(f.server_response_ms)],
-    ["Retransmissions", `${f.retransmissions} (${f.retransmission_pct}%)`], ["Duplicate ACKs", f.dup_acks],
+    ["Retransmissions", `${f.retransmissions} (${f.retransmission_pct}%)`], ["Out-of-order", f.reordered ?? 0], ["Duplicate ACKs", f.dup_acks],
     ["Longest idle gap (s)", fmt(f.max_idle_gap)], ["Throughput (kbps)", fmt(f.throughput_kbps)],
   ].map(([k, v]) => `<div><span>${k}</span><b>${esc(v)}</b></div>`).join("");
   const t0 = f.start;

@@ -246,7 +246,10 @@ class Flow:
     synack_time: float | None = None
     ack_time: float | None = None
     fin_seen: bool = False
-    _next_seq: dict = field(default_factory=dict)
+    _ranges: dict = field(default_factory=dict)
+    _seq_base: dict = field(default_factory=dict)
+    _high_time: dict = field(default_factory=dict)
+    reordered: int = 0
     _last_ack: dict = field(default_factory=dict)
     max_ip_len: int = 0
     max_frame: int = 0
@@ -357,6 +360,48 @@ class Flow:
             if sent and p.ack in sent:
                 self.rtt_samples.append((p.time - sent.pop(p.ack)) * 1000)
 
+    def _classify_segment(self, c2s: bool, seq: int, span: int, t: float) -> tuple[str, int]:
+        """Return ("new" | "reorder" | "retrans", end_seq) for a segment and record its byte range.
+
+        retrans: bytes already seen (full or partial overlap), or a hole filled long after the
+                 higher data arrived (original was likely lost before the capture point).
+        reorder: previously unseen bytes that fill a hole shortly after higher data arrived.
+        """
+        end32 = (seq + span) & 0xFFFFFFFF
+        base = self._seq_base.setdefault(c2s, seq)
+        s = ((seq - base + 0x80000000) & 0xFFFFFFFF) - 0x80000000  # signed offset handles wraparound
+        e = s + span
+        ranges = self._ranges.setdefault(c2s, [])
+        high = ranges[-1][1] if ranges else None
+
+        overlap = any(a < e and s < b for a, b in ranges)
+        if overlap:
+            kind = "retrans"
+        elif high is None or s >= high:
+            kind = "new"
+        else:
+            window = max(0.003, min(self.rtt_samples) / 1000 if self.rtt_samples else 0.0)
+            kind = "reorder" if t - self._high_time.get(c2s, t) <= window else "retrans"
+
+        # merge [s, e) into the sorted range list
+        merged, placed = [], False
+        for a, b in ranges:
+            if b < s:
+                merged.append([a, b])
+            elif e < a:
+                if not placed:
+                    merged.append([s, e])
+                    placed = True
+                merged.append([a, b])
+            else:
+                s, e = min(s, a), max(e, b)
+        if not placed:
+            merged.append([s, e])
+        self._ranges[c2s] = merged[-256:]  # bound memory on long, lossy flows
+        if high is None or merged[-1][1] > high:
+            self._high_time[c2s] = t
+        return kind, end32
+
     def add(self, p: TcpPacket) -> None:
         c2s = (p.src, p.sport) == self.client
         self.packets.append(p)
@@ -380,22 +425,21 @@ class Flow:
               and not p.flags & SYN):
             self.ack_time = p.time
 
-        # retransmission: data (or SYN/FIN) whose seq end does not advance past what we've seen
+        # Track received sequence ranges per direction to tell retransmission from reordering.
         span = p.payload_len + (1 if p.flags & (SYN | FIN) else 0)
         if span:
-            nxt = self._next_seq.get(c2s)
-            end = (p.seq + span) & 0xFFFFFFFF
-            if nxt is not None and ((p.seq - nxt) & 0xFFFFFFFF) > 0x7FFFFFFF:
+            kind, end = self._classify_segment(c2s, p.seq, span, p.time)
+            if kind == "retrans":
                 self.retransmissions += 1
                 if p.payload_len:
                     self.retrans_payloads.append((p.payload_len, p.df))
                 self._pending.get(c2s, {}).pop(end, None)
-            elif nxt is None or ((end - nxt) & 0xFFFFFFFF) < 0x7FFFFFFF:
-                self._next_seq[c2s] = end
-                if p.payload_len:
-                    pend = self._pending.setdefault(c2s, {})
-                    if len(pend) < 2000:
-                        pend[end] = p.time
+            elif kind == "reorder":
+                self.reordered += 1
+            elif p.payload_len:
+                pend = self._pending.setdefault(c2s, {})
+                if len(pend) < 2000:
+                    pend[end] = p.time
         elif p.flags & ACK and not p.flags & (SYN | FIN | RST):
             key = (c2s, p.ack)
             if self._last_ack.get(c2s) == key and p.window != 0:
@@ -427,6 +471,8 @@ class Flow:
             out.append("TLS HelloRetryRequest: server rejected the client's key share (extra round trip).")
         if self.retransmissions:
             out.append(f"{self.retransmissions} retransmission(s): possible packet loss.")
+        if self.reordered:
+            out.append(f"{self.reordered} out-of-order segment(s): packets arrived reordered (no data was resent).")
         if self.dup_acks >= 3:
             out.append(f"{self.dup_acks} duplicate ACKs: likely loss or reordering.")
         if self.zero_windows:
@@ -502,6 +548,7 @@ class Flow:
             "resets": self.resets,
             "retransmissions": self.retransmissions,
             "retransmission_pct": round(100 * self.retransmissions / data_pkts, 2) if data_pkts else 0,
+            "reordered": self.reordered,
             "dup_acks": self.dup_acks,
             "zero_windows": self.zero_windows,
             "ip_version": 6 if v6 else 4,
