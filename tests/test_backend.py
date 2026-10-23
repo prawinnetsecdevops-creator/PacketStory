@@ -365,6 +365,9 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(count(a, a), 2)                            # full overlap collapses to 2
         self.assertEqual(count(a, pcap([(0.0, syn), (0.0004, syn), (0.0008, syn)])), 3)
         self.assertEqual(count(a, pcap([(5.0, syn)])), 3)           # outside window: distinct
+        one = pcap([(0.0, syn)])
+        self.assertEqual(count(one, one, one), 1)                   # three captures, same packet
+        self.assertEqual(count(a, a, a), 2)
 
     def test_malformed_pcapng_is_rejected(self):
         good = pcapng([(0, tcp_pkt("10.0.0.1", "10.0.0.2", 5000, 80, 1, 0, 2))])

@@ -695,18 +695,19 @@ def merge_captures(streams: list[BinaryIO]):
         for _, ts, data, link, orig in read_capture(s):
             yield ts, i, data, link, orig
 
-    recent: dict[bytes, list[list]] = {}  # key -> [[ts, source, paired], ...]
+    recent: dict[bytes, list[list]] = {}  # key -> [[first ts, {sources that saw it}], ...]
     n = 0
     for ts, src, data, link, orig in heapq.merge(*(tagged(i, s) for i, s in enumerate(streams)),
                                                  key=lambda x: x[0]):
         key = hashlib.blake2b(data, digest_size=16).digest()
         entries = [e for e in recent.get(key, ()) if ts - e[0] < DEDUP_WINDOW_S]
-        match = next((e for e in entries if e[1] != src and not e[2]), None)
+        # an instance already holding this source's copy can't absorb another one from it
+        match = next((e for e in entries if src not in e[1]), None)
         if match is not None:
-            match[2] = True
+            match[1].add(src)
             recent[key] = entries
             continue
-        entries.append([ts, src, False])
+        entries.append([ts, {src}])
         recent[key] = entries
         if len(recent) > 200_000:
             recent.clear()
