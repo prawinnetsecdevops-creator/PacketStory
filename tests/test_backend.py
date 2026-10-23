@@ -206,6 +206,111 @@ def tls_client_hello(alpn=b"h2"):
     return b"\x16\x03\x01" + struct.pack(">H", len(hs)) + hs
 
 
+def client_hello_record(sni=b"example.com", pad=0):
+    ext = struct.pack(">HHHBH", 0, len(sni) + 5, len(sni) + 3, 0, len(sni)) + sni
+    if pad:
+        ext += struct.pack(">HH", 21, pad) + b"\x00" * pad
+    body = (b"\x03\x03" + b"\x00" * 32 + b"\x00" + struct.pack(">H", 2) + b"\x13\x01" + b"\x01\x00"
+            + struct.pack(">H", len(ext)) + ext)
+    hs = b"\x01" + struct.pack(">I", len(body))[1:] + body
+    return b"\x16\x03\x01" + struct.pack(">H", len(hs)) + hs
+
+
+def pcap_truncated(packets, snaplen):
+    out = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, snaplen, 1)
+    for ts, p in packets:
+        out += struct.pack("<IIII", int(ts), int((ts % 1) * 1e6), min(len(p), snaplen), len(p)) + p[:snaplen]
+    return out
+
+
+class ReassemblyTests(unittest.TestCase):
+    C, S = "10.0.0.1", "10.0.0.2"
+
+    def c2s(self, sport, dport, seq, payload, t=0.0):
+        return (t, tcp_pkt(self.C, self.S, sport, dport, seq, 1, 0x18, payload))
+
+    def s2c(self, sport, dport, seq, payload, t=0.0):
+        return (t, tcp_pkt(self.S, self.C, sport, dport, seq, 1, 0x18, payload))
+
+    def syn(self, sport, dport, t=0.0):
+        return (t, tcp_pkt(self.C, self.S, sport, dport, 0, 0, 2))
+
+    def test_dns_query_split_across_segments(self):
+        q = struct.pack(">H", len(dns_msg(9, "split.test"))) + dns_msg(9, "split.test")
+        a = struct.pack(">H", len(dns_msg(9, "split.test", 1))) + dns_msg(9, "split.test", 1)
+        d = run(pcap([self.c2s(6000, 53, 1, q[:5], 0.0), self.c2s(6000, 53, 6, q[5:], 0.001),
+                      self.s2c(53, 6000, 1, a[:20], 0.02), self.s2c(53, 6000, 21, a[20:], 0.03)]))["dns"]
+        self.assertEqual((d["queries"], d["responses"], d["unanswered"], d["tcp_messages"]), (1, 1, 0, 2))
+
+    def test_dns_multiple_messages_in_one_segment_and_out_of_order(self):
+        m = lambda i, n: struct.pack(">H", len(dns_msg(i, n))) + dns_msg(i, n)
+        both = m(1, "a.test") + m(2, "b.test")
+        d = run(pcap([self.c2s(6000, 53, 1, both)]))["dns"]
+        self.assertEqual(d["queries"], 2)
+        q = m(3, "c.test")
+        d = run(pcap([self.syn(6001, 53), self.c2s(6001, 53, 6, q[5:], 0.001),
+                      self.c2s(6001, 53, 1, q[:5], 0.002)]))["dns"]
+        self.assertEqual(d["queries"], 1)
+
+    def test_dns_retransmitted_segment_not_double_counted(self):
+        q = struct.pack(">H", len(dns_msg(9, "r.test"))) + dns_msg(9, "r.test")
+        d = run(pcap([self.c2s(6000, 53, 1, q, 0.0), self.c2s(6000, 53, 1, q, 1.0)]))["dns"]
+        self.assertEqual((d["queries"], d["retries"]), (1, 0))
+
+    def test_tls_client_hello_larger_than_one_segment(self):
+        rec = client_hello_record(sni=b"big.example.com", pad=3000)
+        f = run(pcap([self.c2s(5000, 443, 1, rec[:1000], 0.0), self.c2s(5000, 443, 1001, rec[1000:2000], 0.001),
+                      self.c2s(5000, 443, 2001, rec[2000:], 0.002)]))["flows"][0]
+        self.assertEqual((f["application"], f["app_detail"]), ("TLS", "big.example.com"))
+
+    def test_tls_hello_with_sni_after_first_kilobyte_and_reordered(self):
+        rec = client_hello_record(sni=b"late.example.com", pad=0)
+        # a 1.2 KB extension before SNI would have pushed it past the old 1024-byte cap
+        ext = struct.pack(">HH", 21, 1200) + b"\x00" * 1200
+        sni = b"late.example.com"
+        sni_ext = struct.pack(">HHHBH", 0, len(sni) + 5, len(sni) + 3, 0, len(sni)) + sni
+        exts = ext + sni_ext
+        body = (b"\x03\x03" + b"\x00" * 32 + b"\x00" + struct.pack(">H", 2) + b"\x13\x01" + b"\x01\x00"
+                + struct.pack(">H", len(exts)) + exts)
+        hs = b"\x01" + struct.pack(">I", len(body))[1:] + body
+        rec = b"\x16\x03\x01" + struct.pack(">H", len(hs)) + hs
+        cut = 700
+        f = run(pcap([self.syn(5001, 443), self.c2s(5001, 443, 1 + cut, rec[cut:], 0.001),
+                      self.c2s(5001, 443, 1, rec[:cut], 0.002)]))["flows"][0]
+        self.assertEqual(f["app_detail"], "late.example.com")
+
+    def test_tls_server_hello_split_and_alert(self):
+        sh = tls_server_hello()
+        f = run(pcap([self.c2s(5000, 443, 1, tls_client_hello(), 0.0), self.s2c(443, 5000, 1, sh[:7], 0.01),
+                      self.s2c(443, 5000, 8, sh[7:], 0.02)]))["flows"][0]
+        self.assertEqual(f["tls_version"], "TLS 1.3")
+        self.assertFalse(any("ServerHello" in x for x in f["findings"]))
+        alert = b"\x15\x03\x03\x00\x02\x02\x28"
+        f = run(pcap([self.c2s(5002, 443, 1, tls_client_hello(), 0.0), self.s2c(443, 5002, 1, alert[:3], 0.01),
+                      self.s2c(443, 5002, 4, alert[3:], 0.02)]))["flows"][0]
+        self.assertTrue(any("handshake_failure" in x for x in f["findings"]))
+
+    def test_http_split_head_keepalive_and_bodies(self):
+        req = (b"POST /a HTTP/1.1\r\nHost: h.test\r\nContent-Length: 5\r\n\r\nhello"
+               b"GET /b HTTP/1.1\r\nHost: h.test\r\n\r\n")
+        resp = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n0\r\n\r\n"
+                b"HTTP/1.1 503 Busy\r\nContent-Length: 0\r\n\r\n")
+        f = run(pcap([self.c2s(5000, 80, 1, req[:20], 0.0), self.c2s(5000, 80, 21, req[20:], 0.001),
+                      self.s2c(80, 5000, 1, resp[:60], 0.01), self.s2c(80, 5000, 61, resp[60:], 0.02)]))["flows"][0]
+        self.assertEqual(f["http_requests"], 2)
+        self.assertEqual(f["http_status"], {"200": 1, "503": 1})
+        self.assertEqual(f["app_detail"], "POST /a [h.test]")
+
+    def test_snaplen_truncated_hello_still_parsed(self):
+        pkt = tcp_pkt(self.C, self.S, 5000, 443, 1, 1, 0x18, client_hello_record(sni=b"cut.example.com", pad=1000))
+        f = run(pcap_truncated([(0.0, pkt)], 54 + 100))["flows"][0]
+        self.assertEqual(f["app_detail"], "cut.example.com")
+
+    def test_garbage_stream_is_ignored(self):
+        f = run(pcap([self.c2s(5000, 9999, 1, b"\x00\x01binary-ish data that is no known protocol")]))["flows"][0]
+        self.assertIsNone(f["app_detail"])
+
+
 class V2Tests(unittest.TestCase):
     def test_dns_over_tcp(self):
         q, a = dns_msg(7, "big.test"), dns_msg(7, "big.test", 1, 0)

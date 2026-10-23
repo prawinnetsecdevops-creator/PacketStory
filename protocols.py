@@ -342,12 +342,10 @@ class DnsTracker:
         self.failures: list[dict] = []
         self.tcp_msgs = 0
 
-    def feed_tcp(self, ts: float, src: str, sport: int, dst: str, dport: int, payload: bytes) -> None:
-        """DNS over TCP: each message carries a 2-byte length prefix."""
-        if len(payload) < 14 or struct.unpack(">H", payload[:2])[0] < 12:
-            return
+    def feed_tcp(self, ts: float, src: str, sport: int, dst: str, dport: int, msg: bytes) -> None:
+        """One complete DNS message reassembled from a TCP stream (length prefix already removed)."""
         before = self.queries + self.responses
-        self.feed(ts, SimpleNamespace(src=src, dst=dst), sport, dport, payload[2:], "tcp")
+        self.feed(ts, SimpleNamespace(src=src, dst=dst), sport, dport, msg, "tcp")
         self.tcp_msgs += (self.queries + self.responses) - before
 
     def feed(self, ts: float, dec, sport: int, dport: int, payload: bytes, transport: str = "udp") -> None:

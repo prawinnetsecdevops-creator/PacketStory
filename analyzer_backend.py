@@ -31,10 +31,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import BinaryIO
 
-from protocols import (
-    CaptureError, Extras, parse_client_hello, parse_http_request, parse_http_status,
-    parse_other, parse_server_hello, read_capture, service_for, tls_alert,
-)
+from protocols import CaptureError, Extras, parse_other, read_capture, service_for
+from streams import AppStream
 from summary import build_summary
 
 MAX_UPLOAD = 200 * 1024 * 1024
@@ -70,7 +68,8 @@ class TcpPacket:
     wscale: int | None = None
     sack_perm: bool = False
     has_sack: bool = False
-    payload_head: bytes = b""
+    payload: bytes = b""
+    lost: int = 0  # payload bytes cut off by the capture snaplen
 
     @property
     def flag_str(self) -> str:
@@ -195,7 +194,8 @@ def parse_tcp(number: int, ts: float, data: bytes, link: int, orig_len: int = 0)
         src = str(ipaddress.IPv4Address(data[off + 12:off + 16]))
         dst = str(ipaddress.IPv4Address(data[off + 16:off + 20]))
         tcp_off = off + ihl
-        ip_end = min(len(data), off + total) if total >= ihl else len(data)
+        want_end = off + total if total >= ihl else len(data)
+        ip_end = min(len(data), want_end)
     else:
         if len(data) < off + 40:
             return None
@@ -213,7 +213,8 @@ def parse_tcp(number: int, ts: float, data: bytes, link: int, orig_len: int = 0)
             tcp_off += (ext_len + 1) * 8
         if nxt != 6:
             return None
-        ip_end = min(len(data), off + 40 + plen) if plen else len(data)
+        want_end = off + 40 + plen if plen else len(data)
+        ip_end = min(len(data), want_end)
     if len(data) < tcp_off + 20:
         return None
     sport, dport, seq, ack, doff, flags, win = struct.unpack(">HHIIBBH", data[tcp_off:tcp_off + 16])
@@ -225,7 +226,7 @@ def parse_tcp(number: int, ts: float, data: bytes, link: int, orig_len: int = 0)
     return TcpPacket(number, ts, src, dst, sport, dport, seq, ack, flags & 0x3F, win,
                      payload_len, ver,
                      orig_len or len(data), ip_len, ttl, df, mss, wscale, sack_perm, has_sack,
-                     data[tcp_off + hlen:tcp_off + hlen + min(payload_len, 1024)])
+                     data[tcp_off + hlen:ip_end], max(0, want_end - ip_end))
 
 
 @dataclass
@@ -284,37 +285,43 @@ class Flow:
     server_hello: bool = False
     tls_hrr: bool = False
 
-    def _sniff(self, p: TcpPacket, c2s: bool) -> None:
-        h = p.payload_head
-        if not h:
-            return
-        if self.tls_alert is None:
-            self.tls_alert = tls_alert(h)
-        if c2s:
-            req = parse_http_request(h)
-            if req:
-                self.http_requests += 1
-                self.app = "HTTP"
-                self.app_detail = self.app_detail or req
-            elif self.app is None:
-                ch = parse_client_hello(h)
-                if ch:
-                    self.app, self.app_detail, self.tls_version, self.tls_alpn = "TLS", ch[0], ch[1], ch[2]
-                elif h.startswith(b"SSH-"):
-                    self.app, self.app_detail = "SSH", h.split(b"\r\n", 1)[0].decode("latin-1")[:80]
-        else:
-            st = parse_http_status(h)
-            if st:
-                self.http_status[st] = self.http_status.get(st, 0) + 1
-                self.app = self.app or "HTTP"
-            elif self.app is None and h.startswith(b"SSH-"):
-                self.app, self.app_detail = "SSH", h.split(b"\r\n", 1)[0].decode("latin-1")[:80]
-            elif self.app == "TLS":
-                sh = parse_server_hello(h)
-                if sh:
-                    self.server_hello = True
-                    self.tls_version = sh[0] or self.tls_version
-                    self.tls_hrr = self.tls_hrr or sh[1]
+    _streams: dict = field(default_factory=dict)
+    dns_msgs: list = field(default_factory=list)
+
+    def _app_data(self, p: TcpPacket, c2s: bool) -> None:
+        """Feed the segment to this direction's reassembling application parser."""
+        st = self._streams.get(c2s)
+        if st is None:
+            st = self._streams[c2s] = AppStream(server_side=not c2s, dns=53 in (p.sport, p.dport))
+        if p.flags & SYN:
+            st.syn(p.seq)
+        if p.payload or p.lost:
+            for kind, value in st.feed(p.seq, p.payload, p.lost):
+                self._app_event(kind, value, p)
+
+    def _app_event(self, kind: str, v, p: TcpPacket) -> None:
+        if kind == "dns":
+            self.dns_msgs.append((p.time, p.src, p.sport, p.dst, p.dport, v))
+        elif kind == "tls_alert":
+            self.tls_alert = self.tls_alert or v
+        elif kind == "http_req":
+            self.http_requests += 1
+            self.app = "HTTP"
+            self.app_detail = self.app_detail or v
+        elif kind == "http_resp":
+            self.http_status[v] = self.http_status.get(v, 0) + 1
+            self.app = self.app or "HTTP"
+        elif kind == "tls_client_hello":
+            if self.app is None:
+                self.app, self.app_detail, self.tls_version, self.tls_alpn = "TLS", v[0], v[1], v[2]
+        elif kind == "tls_server_hello":
+            if self.app == "TLS":
+                self.server_hello = True
+                self.tls_version = v[0] or self.tls_version
+                self.tls_hrr = self.tls_hrr or v[1]
+        elif kind == "ssh":
+            if self.app is None:
+                self.app, self.app_detail = "SSH", v
 
     def state(self) -> str:
         if self.resets:
@@ -416,7 +423,7 @@ class Flow:
         c2s = (p.src, p.sport) == self.client
         self.packets.append(p)
         self._track(p, c2s)
-        self._sniff(p, c2s)
+        self._app_data(p, c2s)
         if c2s:
             self.bytes_c2s += p.payload_len
         else:
@@ -720,12 +727,11 @@ def analyze_packets(packets, sources: int = 1) -> dict:
             client, server = _orient(p)
             flow = current[key] = Flow(len(all_flows) + 1, client, server)
             all_flows.append(flow)
-        retrans_before = flow.retransmissions
         flow.add(p)
-        if p.dport == 53 or p.sport == 53:
-            if flow.retransmissions == retrans_before:
-                extras.dns.feed_tcp(p.time, p.src, p.sport, p.dst, p.dport, p.payload_head)
-        p.payload_head = b""
+        for ts_, src_, sport_, dst_, dport_, msg in flow.dns_msgs:
+            extras.dns.feed_tcp(ts_, src_, sport_, dst_, dport_, msg)
+        flow.dns_msgs.clear()
+        p.payload = b""
         if len(rows) < MAX_PACKET_ROWS:
             d = p.to_dict()
             d["flow"] = flow.id
