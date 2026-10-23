@@ -253,6 +253,7 @@ class Flow:
     _seq_base: dict = field(default_factory=dict)
     _high_time: dict = field(default_factory=dict)
     reordered: int = 0
+    late_fills: int = 0
     _last_ack: dict = field(default_factory=dict)
     max_ip_len: int = 0
     max_frame: int = 0
@@ -382,9 +383,10 @@ class Flow:
     def _classify_segment(self, c2s: bool, seq: int, span: int, t: float) -> tuple[str, int]:
         """Return ("new" | "reorder" | "retrans", end_seq) for a segment and record its byte range.
 
-        retrans: bytes already seen (full or partial overlap), or a hole filled long after the
-                 higher data arrived (original was likely lost before the capture point).
-        reorder: previously unseen bytes that fill a hole shortly after higher data arrived.
+        retrans: bytes already seen (full or partial overlap), i.e. data actually repeated.
+        reorder: previously unseen bytes that fill a hole behind higher data. If that happens long
+                 after the higher data arrived it is also counted in `late_fills`, since it may be a
+                 retransmission of data lost before the capture point.
         """
         end32 = (seq + span) & 0xFFFFFFFF
         base = self._seq_base.setdefault(c2s, seq)
@@ -399,8 +401,10 @@ class Flow:
         elif high is None or s >= high:
             kind = "new"
         else:
+            kind = "reorder"
             window = max(0.003, min(self.rtt_samples) / 1000 if self.rtt_samples else 0.0)
-            kind = "reorder" if t - self._high_time.get(c2s, t) <= window else "retrans"
+            if t - self._high_time.get(c2s, t) > window:
+                self.late_fills += 1
 
         # merge [s, e) into the sorted range list
         merged, placed = [], False
@@ -496,7 +500,11 @@ class Flow:
         if self.retransmissions:
             out.append(f"{self.retransmissions} retransmission(s): possible packet loss.")
         if self.reordered:
-            out.append(f"{self.reordered} out-of-order segment(s): packets arrived reordered (no data was resent).")
+            out.append(f"{self.reordered} out-of-order segment(s): previously unseen data arrived behind later data "
+                       "(no bytes were repeated).")
+        if self.late_fills:
+            out.append(f"{self.late_fills} of those filled a gap well after later data arrived: either heavy "
+                       "reordering or a retransmission of data lost before the capture point (low confidence).")
         if self.dup_acks >= 3:
             out.append(f"{self.dup_acks} duplicate ACKs: likely loss or reordering.")
         if self.zero_windows:
@@ -580,6 +588,7 @@ class Flow:
             "retransmissions": self.retransmissions,
             "retransmission_pct": round(100 * self.retransmissions / data_pkts, 2) if data_pkts else 0,
             "reordered": self.reordered,
+            "late_fills": self.late_fills,
             "dup_acks": self.dup_acks,
             "zero_windows": self.zero_windows,
             "ip_version": 6 if v6 else 4,
