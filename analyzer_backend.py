@@ -247,6 +247,8 @@ class Flow:
     synack_time: float | None = None
     ack_time: float | None = None
     fin_seen: bool = False
+    rst_time: float | None = None
+    rst_from: set = field(default_factory=set)  # directions (True = client) that sent a RST
     _ranges: dict = field(default_factory=dict)
     _seq_base: dict = field(default_factory=dict)
     _high_time: dict = field(default_factory=dict)
@@ -430,7 +432,8 @@ class Flow:
             self.bytes_s2c += p.payload_len
         if p.flags & RST:
             self.resets += 1
-        if p.flags & FIN:
+            self.rst_time = p.time
+            self.rst_from.add(c2s)
             self.fin_seen = True
         if p.window == 0 and not p.flags & (SYN | RST):
             self.zero_windows += 1
@@ -631,19 +634,33 @@ def _orient(p: TcpPacket) -> tuple[tuple[str, int], tuple[str, int]]:
 IDLE_NEW_CONNECTION_S = 300.0  # a closed/reset flow silent this long is considered finished
 
 
+POST_RST_DATA_S = 1.0  # in-flight data can trail a RST by about one RTT; later data is a new connection
+
+
 def starts_new_connection(flow: Flow, p: TcpPacket) -> bool:
     """True if p begins a new connection on a 4-tuple that `flow` already used.
 
-    A retransmitted SYN/SYN-ACK carries the same initial sequence number and stays in the flow.
+    A SYN or SYN-ACK after a RST is always a new attempt. Otherwise a retransmitted SYN/SYN-ACK
+    carries the same initial sequence number and stays in the flow.
     """
     if p.flags & SYN:
+        if flow.resets:
+            return True
         if p.flags & ACK:
             return flow.synack_seq is not None and p.seq != flow.synack_seq
         if flow.syn_seq is None:
             return True  # flow was picked up midstream, so a SYN is a fresh handshake
-        return p.seq != flow.syn_seq or bool((flow.resets or flow.fin_seen) and flow.ack_time is not None)
+        return p.seq != flow.syn_seq or bool(flow.fin_seen and flow.ack_time is not None)
+    if p.flags & RST:
+        return False
+    if flow.resets and p.payload_len:
+        from_client = (p.src, p.sport) == flow.client
+        # The side that sent the RST cannot continue the old connection; late data from the other
+        # side cannot be in flight any more.
+        if from_client in flow.rst_from or p.time - flow.rst_time > POST_RST_DATA_S:
+            return True
     ended = bool(flow.resets or flow.fin_seen)
-    return ended and not p.flags & RST and (p.time - flow.packets[-1].time) > IDLE_NEW_CONNECTION_S
+    return ended and (p.time - flow.packets[-1].time) > IDLE_NEW_CONNECTION_S
 
 
 SIZE_BINS = [(64, "â‰¤64"), (127, "65â€“127"), (255, "128â€“255"), (511, "256â€“511"),

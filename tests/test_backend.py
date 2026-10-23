@@ -473,6 +473,29 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(len(r["flows"]), 1)
         self.assertEqual(r["flows"][0]["retransmissions"], 2)
 
+    def test_connection_reuse_after_reset_without_new_isn(self):
+        C, S = "10.0.0.1", "10.0.0.2"
+        c = lambda seq, ack, fl, d=b"": tcp_pkt(C, S, 5000, 80, seq, ack, fl, d)
+        s = lambda seq, ack, fl, d=b"": tcp_pkt(S, C, 80, 5000, seq, ack, fl, d)
+
+        def flows(pk, gap=0.01):
+            return run(pcap([(i * gap, p) for i, p in enumerate(pk)]))["flow_count"]
+
+        # refused, then retried with the same ISN
+        self.assertEqual(flows([c(100, 0, 2), s(0, 101, 0x14), c(100, 0, 2), s(0, 101, 0x14)]), 2)
+        # established, reset, same ISN again
+        self.assertEqual(flows([c(100, 0, 2), s(500, 101, 0x12), c(101, 501, 0x10),
+                                s(501, 101, 0x14), c(100, 0, 2)]), 2)
+        # midstream captures (no SYN): data long after a RST, or data from the side that sent it
+        self.assertEqual(flows([c(1000, 1, 0x18, b"a" * 10), s(1, 1010, 0x14),
+                                c(5000, 1, 0x18, b"b" * 10)], gap=2), 2)
+        self.assertEqual(flows([c(1000, 1, 0x18, b"a" * 10), s(1, 1010, 0x14),
+                                s(1, 1010, 0x18, b"b" * 5)]), 2)
+        # in-flight data right behind a RST, and retransmitted SYN/SYN-ACK, stay in one flow
+        self.assertEqual(flows([c(1000, 1, 0x18, b"a" * 10), s(1, 1010, 0x14),
+                                c(1010, 1, 0x18, b"b" * 10)]), 1)
+        self.assertEqual(flows([c(100, 0, 2), c(100, 0, 2), s(500, 101, 0x12), s(500, 101, 0x12)]), 1)
+
     def test_fin_close_then_port_reuse(self):
         c, s = "10.0.0.1", "10.0.0.2"
         r = run(pcap([
